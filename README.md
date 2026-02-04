@@ -96,7 +96,29 @@ Currently configured events:
 - `pull_request` - PR opened, closed, merged, etc.
 - `pull_request_review` - Reviews submitted
 
+## Integration with wopr-plugin-webhooks
+
+For receiving GitHub webhooks without the built-in preset, you can configure a custom mapping in the webhooks plugin:
+
+```json
+{
+  "webhooks": {
+    "mappings": [
+      {
+        "id": "github-events",
+        "match": { "path": "github" },
+        "action": "agent",
+        "wakeMode": "now",
+        "sessionKey": "discord:misfits:#my-channel",
+        "messageTemplate": "GitHub {{action}}: PR #{{pull_request.number}} in {{repository.full_name}}: {{pull_request.title}}\nBy: {{pull_request.user.login}}\nURL: {{pull_request.html_url}}"
+      }
+    ]
+  }
+}
+```
+
+> **Important:** Use `action: "agent"` with `wakeMode: "now"` instead of `action: "wake"` to return 202 Accepted immediately. GitHub webhooks expect fast responses and will timeout/retry if you use synchronous wake actions.
+
 ## License
 
 MIT
-# Test
