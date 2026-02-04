@@ -7,7 +7,7 @@
  * - Uses webhooks extension for routing config
  */
 
-import { execSync } from "node:child_process";
+import { execSync, spawnSync } from "node:child_process";
 import type {
   WOPRPlugin,
   WOPRPluginContext,
@@ -34,6 +34,24 @@ function exec(cmd: string): { stdout: string; success: boolean } {
     return { stdout, success: true };
   } catch (err: any) {
     return { stdout: err.stderr || err.message || "", success: false };
+  }
+}
+
+/**
+ * Execute gh CLI with array of arguments (avoids shell escaping issues)
+ */
+function execGh(args: string[]): { stdout: string; success: boolean } {
+  try {
+    const result = spawnSync("gh", args, {
+      encoding: "utf-8",
+      timeout: 30000,
+    });
+    if (result.status === 0) {
+      return { stdout: (result.stdout || "").trim(), success: true };
+    }
+    return { stdout: (result.stderr || result.stdout || "").trim(), success: false };
+  } catch (err: any) {
+    return { stdout: err.message || "", success: false };
   }
 }
 
@@ -104,16 +122,23 @@ async function setupOrgWebhook(org: string): Promise<WebhookSetupResult> {
     return { success: true, webhookUrl, webhookId: existingId };
   }
 
-  // Create webhook
-  const createCmd = `gh api orgs/${org}/hooks -X POST -f name=web -f active=true \\
-    -f 'config[url]=${webhookUrl}' \\
-    -f 'config[content_type]=json' \\
-    -f 'config[secret]=${webhooksConfig.token}' \\
-    -f 'events[]=pull_request' \\
-    -f 'events[]=pull_request_review' \\
-    --jq '.id'`;
+  // Create webhook using gh api
+  // Build args array to avoid shell escaping issues with secret
+  const createArgs = [
+    "api",
+    `orgs/${org}/hooks`,
+    "-X", "POST",
+    "-f", "name=web",
+    "-f", "active=true",
+    "-f", `config[url]=${webhookUrl}`,
+    "-f", "config[content_type]=json",
+    "-f", `config[secret]=${webhooksConfig.token}`,
+    "-f", "events[]=pull_request",
+    "-f", "events[]=pull_request_review",
+    "--jq", ".id",
+  ];
 
-  const createResult = exec(createCmd);
+  const createResult = execGh(createArgs);
   if (!createResult.success) {
     return { success: false, error: `Failed to create webhook: ${createResult.stdout}` };
   }
