@@ -114,12 +114,19 @@ async function setupOrgWebhook(org: string): Promise<WebhookSetupResult> {
     return { success: false, error: "No webhook token configured" };
   }
 
-  // Check if webhook already exists
-  const listResult = exec(`gh api orgs/${org}/hooks --jq '.[] | select(.config.url == "${webhookUrl}") | .id'`);
+  // Check if webhook already exists (use execGh to avoid shell injection)
+  const listArgs = [
+    "api",
+    `orgs/${org}/hooks`,
+    "--jq", `.[] | select(.config.url == "${webhookUrl}") | .id`,
+  ];
+  const listResult = execGh(listArgs);
   if (listResult.success && listResult.stdout) {
     const existingId = parseInt(listResult.stdout, 10);
-    ctx?.log.info(`Webhook already exists for ${org}: ID ${existingId}`);
-    return { success: true, webhookUrl, webhookId: existingId };
+    if (!isNaN(existingId)) {
+      ctx?.log.info(`Webhook already exists for ${org}: ID ${existingId}`);
+      return { success: true, webhookUrl, webhookId: existingId };
+    }
   }
 
   // Create webhook using gh api
@@ -144,6 +151,9 @@ async function setupOrgWebhook(org: string): Promise<WebhookSetupResult> {
   }
 
   const webhookId = parseInt(createResult.stdout, 10);
+  if (isNaN(webhookId)) {
+    return { success: false, error: `Invalid webhook ID returned: ${createResult.stdout}` };
+  }
   ctx?.log.info(`Created webhook for ${org}: ID ${webhookId}`);
 
   return { success: true, webhookUrl, webhookId };
