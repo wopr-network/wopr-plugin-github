@@ -1,18 +1,29 @@
 {
-  "name": "wopr-plugin-github",
-  "version": "1.0.0",
-  "description": "GitHub integration for WOPR - webhooks, PRs, repo management",
-  "type": "module",
-  "main": "dist/index.js",
-  "scripts": {
-    "build": "tsc",
-    "dev": "tsc --watch"
-  },
-  "keywords": ["wopr", "plugin", "github", "webhooks", "pr"],
   "author": "WOPR",
-  "license": "MIT",
+  "description": "GitHub integration for WOPR - webhooks, PRs, repo management",
   "devDependencies": {
+    "@biomejs/biome": "^2.3.14",
     "@types/node": "^20.10.0",
     "typescript": "^5.3.3"
-  }
+  },
+  "keywords": [
+    "wopr",
+    "plugin",
+    "github",
+    "webhooks",
+    "pr"
+  ],
+  "license": "MIT",
+  "main": "dist/index.js",
+  "name": "wopr-plugin-github",
+  "scripts": {
+    "build": "tsc",
+    "check": "biome check src/ && tsc --noEmit",
+    "dev": "tsc --watch",
+    "format": "biome format --write src/",
+    "lint": "biome check src/",
+    "lint:fix": "biome check --fix src/"
+  },
+  "type": "module",
+  "version": "1.0.0"
 }
