@@ -20,6 +20,21 @@ export interface GitHubConfig {
   releaseSession?: string;
   /** Event-type routing table: maps GitHub event types to WOPR session names */
   routing?: EventRoutingTable;
+  /** Repo-level webhook subscriptions: maps "owner/repo" to subscription info */
+  subscriptions?: Record<string, RepoSubscription>;
+}
+
+export interface RepoSubscription {
+  /** The "owner/repo" string */
+  repo: string;
+  /** GitHub webhook ID (for cleanup on unsubscribe) */
+  webhookId: number;
+  /** GitHub event types this subscription listens for */
+  events: string[];
+  /** WOPR session to route events to (optional override; uses routing table if unset) */
+  session?: string;
+  /** ISO timestamp of when the subscription was created */
+  createdAt: string;
 }
 
 export interface WebhookSetupResult {
@@ -89,6 +104,18 @@ export interface GitHubExtension {
 
   /** View issue details */
   viewIssue(repo: string, num: number): GitHubItemSummary | null;
+
+  /** Subscribe a repo to webhook events */
+  subscribe(
+    repo: string,
+    options?: { events?: string[]; session?: string },
+  ): Promise<WebhookSetupResult>;
+
+  /** Unsubscribe a repo from webhook events */
+  unsubscribe(repo: string): Promise<{ success: boolean; error?: string }>;
+
+  /** List all repo-level subscriptions */
+  listSubscriptions(): RepoSubscription[];
 }
 
 export interface WOPRPluginContext {

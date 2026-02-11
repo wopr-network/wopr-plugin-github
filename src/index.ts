@@ -8,17 +8,21 @@
  */
 
 import { execSync, spawnSync } from "node:child_process";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type {
-  WOPRPlugin,
-  WOPRPluginContext,
+  FunnelExtension,
   GitHubConfig,
   GitHubExtension,
   GitHubItemSummary,
-  WebhookSetupResult,
+  RepoSubscription,
   WebhookEvent,
   WebhookRouteResult,
-  FunnelExtension,
+  WebhookSetupResult,
   WebhooksExtension,
+  WOPRPlugin,
+  WOPRPluginContext,
 } from "./types.js";
 
 // ============================================================================
@@ -26,6 +30,13 @@ import type {
 // ============================================================================
 
 let ctx: WOPRPluginContext | null = null;
+
+/**
+ * Path to the subscriptions persistence file.
+ * Stored alongside the plugin source in a `data/` directory.
+ */
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const SUBSCRIPTIONS_PATH = join(__dirname, "..", "data", "subscriptions.json");
 
 // ============================================================================
 // Helpers
@@ -52,7 +63,10 @@ function execGh(args: string[]): { stdout: string; success: boolean } {
     if (result.status === 0) {
       return { stdout: (result.stdout || "").trim(), success: true };
     }
-    return { stdout: (result.stderr || result.stdout || "").trim(), success: false };
+    return {
+      stdout: (result.stderr || result.stdout || "").trim(),
+      success: false,
+    };
   } catch (err: any) {
     return { stdout: err.message || "", success: false };
   }
@@ -101,13 +115,20 @@ async function getWebhookUrl(): Promise<string | null> {
 async function setupOrgWebhook(org: string): Promise<WebhookSetupResult> {
   // Check gh auth
   if (!(await checkGhAuth())) {
-    return { success: false, error: "gh CLI not authenticated. Run 'gh auth login' first." };
+    return {
+      success: false,
+      error: "gh CLI not authenticated. Run 'gh auth login' first.",
+    };
   }
 
   // Get webhook URL
   const webhookUrl = await getWebhookUrl();
   if (!webhookUrl) {
-    return { success: false, error: "No webhook URL available. Ensure tailscale-funnel and webhooks plugins are configured." };
+    return {
+      success: false,
+      error:
+        "No webhook URL available. Ensure tailscale-funnel and webhooks plugins are configured.",
+    };
   }
 
   // Get webhook secret from webhooks config
@@ -121,12 +142,13 @@ async function setupOrgWebhook(org: string): Promise<WebhookSetupResult> {
   const listArgs = [
     "api",
     `orgs/${org}/hooks`,
-    "--jq", `.[] | select(.config.url == "${webhookUrl}") | .id`,
+    "--jq",
+    `.[] | select(.config.url == "${webhookUrl}") | .id`,
   ];
   const listResult = execGh(listArgs);
   if (listResult.success && listResult.stdout) {
     const existingId = parseInt(listResult.stdout, 10);
-    if (!isNaN(existingId)) {
+    if (!Number.isNaN(existingId)) {
       ctx?.log.info(`Webhook already exists for ${org}: ID ${existingId}`);
       return { success: true, webhookUrl, webhookId: existingId };
     }
@@ -137,29 +159,282 @@ async function setupOrgWebhook(org: string): Promise<WebhookSetupResult> {
   const createArgs = [
     "api",
     `orgs/${org}/hooks`,
-    "-X", "POST",
-    "-f", "name=web",
-    "-f", "active=true",
-    "-f", `config[url]=${webhookUrl}`,
-    "-f", "config[content_type]=json",
-    "-f", `config[secret]=${webhooksConfig.token}`,
-    "-f", "events[]=pull_request",
-    "-f", "events[]=pull_request_review",
-    "--jq", ".id",
+    "-X",
+    "POST",
+    "-f",
+    "name=web",
+    "-f",
+    "active=true",
+    "-f",
+    `config[url]=${webhookUrl}`,
+    "-f",
+    "config[content_type]=json",
+    "-f",
+    `config[secret]=${webhooksConfig.token}`,
+    "-f",
+    "events[]=pull_request",
+    "-f",
+    "events[]=pull_request_review",
+    "--jq",
+    ".id",
   ];
 
   const createResult = execGh(createArgs);
   if (!createResult.success) {
-    return { success: false, error: `Failed to create webhook: ${createResult.stdout}` };
+    return {
+      success: false,
+      error: `Failed to create webhook: ${createResult.stdout}`,
+    };
   }
 
   const webhookId = parseInt(createResult.stdout, 10);
-  if (isNaN(webhookId)) {
-    return { success: false, error: `Invalid webhook ID returned: ${createResult.stdout}` };
+  if (Number.isNaN(webhookId)) {
+    return {
+      success: false,
+      error: `Invalid webhook ID returned: ${createResult.stdout}`,
+    };
   }
   ctx?.log.info(`Created webhook for ${org}: ID ${webhookId}`);
 
   return { success: true, webhookUrl, webhookId };
+}
+
+// ============================================================================
+// Repo-Level Webhook Subscriptions
+// ============================================================================
+
+const DEFAULT_REPO_EVENTS = [
+  "push",
+  "pull_request",
+  "pull_request_review",
+  "issues",
+  "issue_comment",
+];
+
+/**
+ * In-memory subscription cache, loaded from disk on init.
+ * Keyed by "owner/repo".
+ */
+const subscriptions = new Map<string, RepoSubscription>();
+
+/**
+ * Persist the current subscriptions Map to disk as JSON.
+ */
+function persistSubscriptions(): void {
+  try {
+    const obj: Record<string, RepoSubscription> = {};
+    for (const [repo, sub] of subscriptions) {
+      obj[repo] = sub;
+    }
+    mkdirSync(dirname(SUBSCRIPTIONS_PATH), { recursive: true });
+    writeFileSync(SUBSCRIPTIONS_PATH, `${JSON.stringify(obj, null, 2)}\n`);
+    ctx?.log.debug?.(`Persisted ${subscriptions.size} subscription(s) to disk`);
+  } catch (err: any) {
+    ctx?.log.warn(`Failed to persist subscriptions: ${err.message}`);
+  }
+}
+
+/**
+ * Load subscriptions from disk (subscriptions.json), falling back to config.
+ */
+function loadSubscriptions(): void {
+  subscriptions.clear();
+
+  // Try loading from subscriptions.json first
+  try {
+    const raw = readFileSync(SUBSCRIPTIONS_PATH, "utf-8");
+    const obj = JSON.parse(raw) as Record<string, RepoSubscription>;
+    for (const [repo, sub] of Object.entries(obj)) {
+      subscriptions.set(repo, sub);
+    }
+    if (subscriptions.size > 0) {
+      return;
+    }
+  } catch {
+    // File doesn't exist or is invalid — fall through to config
+  }
+
+  // Fall back to config-embedded subscriptions (migration path)
+  const config = ctx?.getConfig<GitHubConfig>();
+  if (config?.subscriptions) {
+    for (const [repo, sub] of Object.entries(config.subscriptions)) {
+      subscriptions.set(repo, sub);
+    }
+    // Migrate: persist to file so future loads use the file
+    if (subscriptions.size > 0) {
+      persistSubscriptions();
+    }
+  }
+}
+
+/**
+ * Validate "owner/repo" format.
+ */
+function isValidRepo(repo: string): boolean {
+  return /^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/.test(repo);
+}
+
+async function subscribeRepo(
+  repo: string,
+  options?: { events?: string[]; session?: string },
+): Promise<WebhookSetupResult> {
+  if (!isValidRepo(repo)) {
+    return {
+      success: false,
+      error: `Invalid repo format: "${repo}". Use owner/repo`,
+    };
+  }
+
+  if (!(await checkGhAuth())) {
+    return {
+      success: false,
+      error: "gh CLI not authenticated. Run 'gh auth login' first.",
+    };
+  }
+
+  // Already subscribed?
+  const existing = subscriptions.get(repo);
+  if (existing) {
+    return {
+      success: false,
+      error: `Already subscribed to ${repo} (webhook ID: ${existing.webhookId}). Unsubscribe first to change settings.`,
+    };
+  }
+
+  const webhookUrl = await getWebhookUrl();
+  if (!webhookUrl) {
+    return {
+      success: false,
+      error:
+        "No webhook URL available. Ensure tailscale-funnel and webhooks plugins are configured.",
+    };
+  }
+
+  const webhooks = getWebhooksExtension();
+  const webhooksConfig = webhooks?.getConfig();
+  if (!webhooksConfig?.token) {
+    return { success: false, error: "No webhook token configured" };
+  }
+
+  const events = options?.events ?? DEFAULT_REPO_EVENTS;
+
+  // Check if webhook already exists on this repo pointing to our URL
+  const listArgs = [
+    "api",
+    `repos/${repo}/hooks`,
+    "--jq",
+    `.[] | select(.config.url == "${webhookUrl}") | .id`,
+  ];
+  const listResult = execGh(listArgs);
+  if (listResult.success && listResult.stdout) {
+    const existingId = parseInt(listResult.stdout.split("\n")[0], 10);
+    if (!Number.isNaN(existingId)) {
+      // Webhook exists on GitHub but not in our tracking -- adopt it
+      const sub: RepoSubscription = {
+        repo,
+        webhookId: existingId,
+        events,
+        session: options?.session,
+        createdAt: new Date().toISOString(),
+      };
+      subscriptions.set(repo, sub);
+      persistSubscriptions();
+      ctx?.log.info(`Adopted existing webhook for ${repo}: ID ${existingId}`);
+      return { success: true, webhookUrl, webhookId: existingId };
+    }
+  }
+
+  // Create repo-level webhook
+  const createArgs = [
+    "api",
+    `repos/${repo}/hooks`,
+    "-X",
+    "POST",
+    "-f",
+    "name=web",
+    "-f",
+    "active=true",
+    "-f",
+    `config[url]=${webhookUrl}`,
+    "-f",
+    "config[content_type]=json",
+    "-f",
+    `config[secret]=${webhooksConfig.token}`,
+  ];
+  for (const event of events) {
+    createArgs.push("-f", `events[]=${event}`);
+  }
+  createArgs.push("--jq", ".id");
+
+  const createResult = execGh(createArgs);
+  if (!createResult.success) {
+    return {
+      success: false,
+      error: `Failed to create webhook: ${createResult.stdout}`,
+    };
+  }
+
+  const webhookId = parseInt(createResult.stdout, 10);
+  if (Number.isNaN(webhookId)) {
+    return {
+      success: false,
+      error: `Invalid webhook ID returned: ${createResult.stdout}`,
+    };
+  }
+
+  const sub: RepoSubscription = {
+    repo,
+    webhookId,
+    events,
+    session: options?.session,
+    createdAt: new Date().toISOString(),
+  };
+  subscriptions.set(repo, sub);
+  persistSubscriptions();
+  ctx?.log.info(`Subscribed to ${repo}: webhook ID ${webhookId}`);
+  return { success: true, webhookUrl, webhookId };
+}
+
+async function unsubscribeRepo(
+  repo: string,
+): Promise<{ success: boolean; error?: string }> {
+  const sub = subscriptions.get(repo);
+  if (!sub) {
+    return { success: false, error: `Not subscribed to ${repo}` };
+  }
+
+  if (!(await checkGhAuth())) {
+    return {
+      success: false,
+      error: "gh CLI not authenticated. Run 'gh auth login' first.",
+    };
+  }
+
+  // Delete the webhook from GitHub
+  const deleteArgs = [
+    "api",
+    `repos/${repo}/hooks/${sub.webhookId}`,
+    "-X",
+    "DELETE",
+  ];
+  const deleteResult = execGh(deleteArgs);
+  if (!deleteResult.success) {
+    // If 404, webhook was already removed -- that's fine
+    if (
+      !deleteResult.stdout.includes("Not Found") &&
+      !deleteResult.stdout.includes("404")
+    ) {
+      return {
+        success: false,
+        error: `Failed to delete webhook: ${deleteResult.stdout}`,
+      };
+    }
+  }
+
+  subscriptions.delete(repo);
+  persistSubscriptions();
+  ctx?.log.info(`Unsubscribed from ${repo} (webhook ID ${sub.webhookId})`);
+  return { success: true };
 }
 
 // ============================================================================
@@ -170,12 +445,24 @@ async function setupOrgWebhook(org: string): Promise<WebhookSetupResult> {
  * Resolve which session an event type should route to.
  *
  * Priority:
- * 1. Exact match in routing table (e.g. "pull_request" -> "code-review")
- * 2. Wildcard "*" in routing table
- * 3. Legacy prReviewSession / releaseSession fields
- * 4. null (no route configured)
+ * 1. Repo-level subscription session override (if repo provided)
+ * 2. Exact match in routing table (e.g. "pull_request" -> "code-review")
+ * 3. Wildcard "*" in routing table
+ * 4. Legacy prReviewSession / releaseSession fields
+ * 5. null (no route configured)
  */
-function resolveSessionFromConfig(eventType: string): string | null {
+function resolveSessionFromConfig(
+  eventType: string,
+  repo?: string,
+): string | null {
+  // 0. Check repo-level subscription session override
+  if (repo) {
+    const sub = subscriptions.get(repo);
+    if (sub?.session) {
+      return sub.session;
+    }
+  }
+
   const config = ctx?.getConfig<GitHubConfig>();
   if (!config) return null;
 
@@ -229,24 +516,53 @@ function truncate(text: string, maxLen: number): string {
   if (!text) return "";
   const oneLine = text.replace(/\r?\n/g, " ").trim();
   if (oneLine.length <= maxLen) return oneLine;
-  return oneLine.slice(0, maxLen - 3) + "...";
+  return `${oneLine.slice(0, maxLen - 3)}...`;
 }
 
 const PR_JSON_FIELDS = [
-  "number", "title", "state", "author", "labels", "body", "url",
-  "createdAt", "updatedAt", "mergeable", "reviewDecision",
-  "additions", "deletions", "headRefName", "baseRefName",
+  "number",
+  "title",
+  "state",
+  "author",
+  "labels",
+  "body",
+  "url",
+  "createdAt",
+  "updatedAt",
+  "mergeable",
+  "reviewDecision",
+  "additions",
+  "deletions",
+  "headRefName",
+  "baseRefName",
 ].join(",");
 
 const ISSUE_JSON_FIELDS = [
-  "number", "title", "state", "author", "labels", "body", "url",
-  "createdAt", "updatedAt",
+  "number",
+  "title",
+  "state",
+  "author",
+  "labels",
+  "body",
+  "url",
+  "createdAt",
+  "updatedAt",
 ].join(",");
 
 function viewPr(repo: string, num: number): GitHubItemSummary | null {
-  const result = execGh(["pr", "view", String(num), "--repo", repo, "--json", PR_JSON_FIELDS]);
+  const result = execGh([
+    "pr",
+    "view",
+    String(num),
+    "--repo",
+    repo,
+    "--json",
+    PR_JSON_FIELDS,
+  ]);
   if (!result.success) {
-    ctx?.log.debug?.(`[github] Failed to fetch PR ${repo}#${num}: ${result.stdout}`);
+    ctx?.log.debug?.(
+      `[github] Failed to fetch PR ${repo}#${num}: ${result.stdout}`,
+    );
     return null;
   }
 
@@ -278,9 +594,19 @@ function viewPr(repo: string, num: number): GitHubItemSummary | null {
 }
 
 function viewIssue(repo: string, num: number): GitHubItemSummary | null {
-  const result = execGh(["issue", "view", String(num), "--repo", repo, "--json", ISSUE_JSON_FIELDS]);
+  const result = execGh([
+    "issue",
+    "view",
+    String(num),
+    "--repo",
+    repo,
+    "--json",
+    ISSUE_JSON_FIELDS,
+  ]);
   if (!result.success) {
-    ctx?.log.debug?.(`[github] Failed to fetch issue ${repo}#${num}: ${result.stdout}`);
+    ctx?.log.debug?.(
+      `[github] Failed to fetch issue ${repo}#${num}: ${result.stdout}`,
+    );
     return null;
   }
 
@@ -300,7 +626,9 @@ function viewIssue(repo: string, num: number): GitHubItemSummary | null {
       updatedAt: data.updatedAt,
     };
   } catch {
-    ctx?.log.debug?.(`[github] Failed to parse issue response for ${repo}#${num}`);
+    ctx?.log.debug?.(
+      `[github] Failed to parse issue response for ${repo}#${num}`,
+    );
     return null;
   }
 }
@@ -318,7 +646,9 @@ function formatSummary(item: GitHubItemSummary): string {
       lines.push(`  Branch: ${item.headRef} -> ${item.baseRef}`);
     }
     if (item.additions !== undefined || item.deletions !== undefined) {
-      lines.push(`  Changes: +${item.additions || 0} / -${item.deletions || 0}`);
+      lines.push(
+        `  Changes: +${item.additions || 0} / -${item.deletions || 0}`,
+      );
     }
     if (item.reviewDecision) {
       lines.push(`  Review: ${item.reviewDecision}`);
@@ -349,19 +679,35 @@ const githubExtension: GitHubExtension = {
   },
 
   handleWebhook(event: WebhookEvent): WebhookRouteResult {
-    const { eventType, deliveryId } = event;
+    const { eventType, deliveryId, payload } = event;
 
     if (!eventType) {
       return { routed: false, reason: "Missing event type" };
     }
 
-    const session = resolveSessionFromConfig(eventType);
+    // Extract repo from payload for subscription-level routing
+    const repository = payload.repository as
+      | Record<string, unknown>
+      | undefined;
+    const repo =
+      typeof repository?.full_name === "string"
+        ? repository.full_name
+        : undefined;
+
+    const session = resolveSessionFromConfig(eventType, repo);
     if (!session) {
-      ctx?.log.debug?.(`[github] No route for event type: ${eventType} (delivery: ${deliveryId || "unknown"})`);
-      return { routed: false, reason: `No session configured for event type: ${eventType}` };
+      ctx?.log.debug?.(
+        `[github] No route for event type: ${eventType} (delivery: ${deliveryId || "unknown"})`,
+      );
+      return {
+        routed: false,
+        reason: `No session configured for event type: ${eventType}`,
+      };
     }
 
-    ctx?.log.info(`[github] Routing ${eventType} -> session "${session}" (delivery: ${deliveryId || "unknown"})`);
+    ctx?.log.info(
+      `[github] Routing ${eventType} -> session "${session}" (delivery: ${deliveryId || "unknown"})`,
+    );
     return { routed: true, session };
   },
 
@@ -375,6 +721,21 @@ const githubExtension: GitHubExtension = {
 
   viewIssue(repo: string, num: number): GitHubItemSummary | null {
     return viewIssue(repo, num);
+  },
+
+  async subscribe(
+    repo: string,
+    options?: { events?: string[]; session?: string },
+  ) {
+    return subscribeRepo(repo, options);
+  },
+
+  async unsubscribe(repo: string) {
+    return unsubscribeRepo(repo);
+  },
+
+  listSubscriptions(): RepoSubscription[] {
+    return Array.from(subscriptions.values());
   },
 };
 
@@ -402,7 +763,8 @@ const plugin: WOPRPlugin = {
         type: "string",
         label: "PR Review Session",
         description: "Session to route PR events to",
-        default: "discord:misfits:#pay-no-attention-to-the-man-behind-the-curtain",
+        default:
+          "discord:misfits:#pay-no-attention-to-the-man-behind-the-curtain",
       },
       {
         name: "releaseSession",
@@ -424,13 +786,16 @@ const plugin: WOPRPlugin = {
     {
       name: "github",
       description: "GitHub integration commands",
-      usage: "wopr github <setup|status|pr|issue|webhook|url> [arg]",
+      usage:
+        "wopr github <setup|status|subscribe|unsubscribe|subscriptions|pr|issue|webhook|url> [arg]",
       async handler(cmdCtx, args) {
         const [subcommand, orgArg] = args;
 
         if (subcommand === "status") {
           const authed = await checkGhAuth();
-          cmdCtx.log.info(`GitHub CLI: ${authed ? "authenticated" : "not authenticated"}`);
+          cmdCtx.log.info(
+            `GitHub CLI: ${authed ? "authenticated" : "not authenticated"}`,
+          );
 
           const webhookUrl = await getWebhookUrl();
           cmdCtx.log.info(`Webhook URL: ${webhookUrl || "not available"}`);
@@ -438,6 +803,14 @@ const plugin: WOPRPlugin = {
           const config = cmdCtx.getConfig<GitHubConfig>();
           if (config?.orgs?.length) {
             cmdCtx.log.info(`Configured orgs: ${config.orgs.join(", ")}`);
+          }
+
+          const subCount = subscriptions.size;
+          cmdCtx.log.info(`Repo subscriptions: ${subCount}`);
+          if (subCount > 0) {
+            for (const sub of subscriptions.values()) {
+              cmdCtx.log.info(`  ${sub.repo} (webhook ${sub.webhookId})`);
+            }
           }
           return;
         }
@@ -447,7 +820,9 @@ const plugin: WOPRPlugin = {
           const orgs = orgArg ? [orgArg] : config?.orgs || [];
 
           if (orgs.length === 0) {
-            cmdCtx.log.error("No org specified. Usage: wopr github setup <org>");
+            cmdCtx.log.error(
+              "No org specified. Usage: wopr github setup <org>",
+            );
             return;
           }
 
@@ -478,9 +853,19 @@ const plugin: WOPRPlugin = {
           if (pr) {
             cmdCtx.log.info(formatSummary(pr));
           } else {
-            const ghResult = execGh(["pr", "view", String(ref.num), "--repo", ref.repo, "--json", "number"]);
+            const ghResult = execGh([
+              "pr",
+              "view",
+              String(ref.num),
+              "--repo",
+              ref.repo,
+              "--json",
+              "number",
+            ]);
             const detail = ghResult.success ? "" : `: ${ghResult.stdout}`;
-            cmdCtx.log.error(`Could not fetch PR ${ref.repo}#${ref.num}${detail}`);
+            cmdCtx.log.error(
+              `Could not fetch PR ${ref.repo}#${ref.num}${detail}`,
+            );
           }
           return;
         }
@@ -499,9 +884,19 @@ const plugin: WOPRPlugin = {
           if (issue) {
             cmdCtx.log.info(formatSummary(issue));
           } else {
-            const ghResult = execGh(["issue", "view", String(ref.num), "--repo", ref.repo, "--json", "number"]);
+            const ghResult = execGh([
+              "issue",
+              "view",
+              String(ref.num),
+              "--repo",
+              ref.repo,
+              "--json",
+              "number",
+            ]);
             const detail = ghResult.success ? "" : `: ${ghResult.stdout}`;
-            cmdCtx.log.error(`Could not fetch issue ${ref.repo}#${ref.num}${detail}`);
+            cmdCtx.log.error(
+              `Could not fetch issue ${ref.repo}#${ref.num}${detail}`,
+            );
           }
           return;
         }
@@ -511,20 +906,104 @@ const plugin: WOPRPlugin = {
           if (url) {
             cmdCtx.log.info(`Webhook URL: ${url}`);
           } else {
-            cmdCtx.log.error("Webhook URL not available. Check funnel and webhooks plugins.");
+            cmdCtx.log.error(
+              "Webhook URL not available. Check funnel and webhooks plugins.",
+            );
           }
           return;
         }
 
-        cmdCtx.log.info("Usage: wopr github <setup|status|pr|issue|webhook|url> [arg]");
+        if (subcommand === "subscribe") {
+          if (!orgArg) {
+            cmdCtx.log.error(
+              "Usage: wopr github subscribe owner/repo [--events push,pull_request] [--session session-name]",
+            );
+            return;
+          }
+
+          // Parse optional flags from remaining args
+          let events: string[] | undefined;
+          let session: string | undefined;
+          for (let i = 1; i < args.length; i++) {
+            if (args[i] === "--events" && args[i + 1]) {
+              events = args[i + 1].split(",").map((e) => e.trim());
+              i++;
+            } else if (args[i] === "--session" && args[i + 1]) {
+              session = args[i + 1];
+              i++;
+            }
+          }
+
+          cmdCtx.log.info(`Subscribing to ${orgArg}...`);
+          const result = await subscribeRepo(orgArg, { events, session });
+          if (result.success) {
+            cmdCtx.log.info(`Subscribed to ${orgArg}`);
+            cmdCtx.log.info(`  Webhook URL: ${result.webhookUrl}`);
+            cmdCtx.log.info(`  Webhook ID: ${result.webhookId}`);
+          } else {
+            cmdCtx.log.error(`Failed: ${result.error}`);
+          }
+          return;
+        }
+
+        if (subcommand === "unsubscribe") {
+          if (!orgArg) {
+            cmdCtx.log.error("Usage: wopr github unsubscribe owner/repo");
+            return;
+          }
+
+          cmdCtx.log.info(`Unsubscribing from ${orgArg}...`);
+          const result = await unsubscribeRepo(orgArg);
+          if (result.success) {
+            cmdCtx.log.info(`Unsubscribed from ${orgArg}`);
+          } else {
+            cmdCtx.log.error(`Failed: ${result.error}`);
+          }
+          return;
+        }
+
+        if (subcommand === "subscriptions") {
+          const subs = Array.from(subscriptions.values());
+          if (subs.length === 0) {
+            cmdCtx.log.info("No repo subscriptions active.");
+            return;
+          }
+          cmdCtx.log.info(`Active subscriptions (${subs.length}):`);
+          for (const sub of subs) {
+            const sessionInfo = sub.session ? ` -> ${sub.session}` : "";
+            cmdCtx.log.info(
+              `  ${sub.repo} (webhook ${sub.webhookId})${sessionInfo}`,
+            );
+            cmdCtx.log.info(`    Events: ${sub.events.join(", ")}`);
+            cmdCtx.log.info(`    Since: ${sub.createdAt}`);
+          }
+          return;
+        }
+
+        cmdCtx.log.info("Usage: wopr github <command> [arg]");
         cmdCtx.log.info("");
         cmdCtx.log.info("Commands:");
-        cmdCtx.log.info("  status              - Show GitHub integration status");
-        cmdCtx.log.info("  setup [org]         - Set up webhooks for configured orgs");
-        cmdCtx.log.info("  webhook [org]       - Alias for setup");
-        cmdCtx.log.info("  pr owner/repo#123   - View pull request details");
-        cmdCtx.log.info("  issue owner/repo#123 - View issue details");
-        cmdCtx.log.info("  url                 - Show webhook URL");
+        cmdCtx.log.info(
+          "  status                  - Show GitHub integration status",
+        );
+        cmdCtx.log.info(
+          "  setup [org]             - Set up org-level webhooks",
+        );
+        cmdCtx.log.info("  webhook [org]           - Alias for setup");
+        cmdCtx.log.info(
+          "  subscribe owner/repo    - Subscribe to repo webhook events",
+        );
+        cmdCtx.log.info(
+          "  unsubscribe owner/repo  - Unsubscribe from repo webhook events",
+        );
+        cmdCtx.log.info(
+          "  subscriptions           - List active repo subscriptions",
+        );
+        cmdCtx.log.info(
+          "  pr owner/repo#123       - View pull request details",
+        );
+        cmdCtx.log.info("  issue owner/repo#123    - View issue details");
+        cmdCtx.log.info("  url                     - Show webhook URL");
       },
     },
   ],
@@ -536,10 +1015,15 @@ const plugin: WOPRPlugin = {
     // Register extension
     ctx.registerExtension("github", githubExtension);
 
+    // Load subscriptions from disk (or migrate from config)
+    loadSubscriptions();
+
     // Check gh CLI availability
     const ghAvailable = exec("which gh").success;
     if (!ghAvailable) {
-      ctx.log.warn("GitHub CLI (gh) not found. Install: brew install gh (macOS) or apt install gh (Debian)");
+      ctx.log.warn(
+        "GitHub CLI (gh) not found. Install: brew install gh (macOS) or apt install gh (Debian)",
+      );
     } else {
       const authed = await checkGhAuth();
       if (!authed) {
@@ -551,17 +1035,31 @@ const plugin: WOPRPlugin = {
 
     // Log configured orgs
     if (config?.orgs?.length) {
-      ctx.log.info(`GitHub plugin initialized for orgs: ${config.orgs.join(", ")}`);
+      ctx.log.info(
+        `GitHub plugin initialized for orgs: ${config.orgs.join(", ")}`,
+      );
     } else {
       ctx.log.info("GitHub plugin initialized (no orgs configured)");
+    }
+
+    // Log subscription count
+    if (subscriptions.size > 0) {
+      ctx.log.info(`Loaded ${subscriptions.size} repo subscription(s)`);
     }
   },
 
   async shutdown() {
+    subscriptions.clear();
     ctx?.unregisterExtension("github");
     ctx = null;
   },
 };
 
 export default plugin;
-export type { GitHubExtension, GitHubItemSummary, WebhookEvent, WebhookRouteResult };
+export type {
+  GitHubExtension,
+  GitHubItemSummary,
+  RepoSubscription,
+  WebhookEvent,
+  WebhookRouteResult,
+};
