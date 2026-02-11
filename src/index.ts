@@ -214,7 +214,7 @@ function resolveSessionFromConfig(eventType: string): string | null {
 
 /**
  * Parse "owner/repo#123" into { repo: "owner/repo", num: 123 }.
- * Also accepts "owner/repo 123" or just "123" (requires default repo).
+ * Only supports the "owner/repo#123" format.
  */
 function parseRef(input: string): { repo: string; num: number } | null {
   // owner/repo#123
@@ -424,7 +424,7 @@ const plugin: WOPRPlugin = {
     {
       name: "github",
       description: "GitHub integration commands",
-      usage: "wopr github <setup|status|pr|issue|url> [arg]",
+      usage: "wopr github <setup|status|pr|issue|webhook|url> [arg]",
       async handler(cmdCtx, args) {
         const [subcommand, orgArg] = args;
 
@@ -478,7 +478,9 @@ const plugin: WOPRPlugin = {
           if (pr) {
             cmdCtx.log.info(formatSummary(pr));
           } else {
-            cmdCtx.log.error(`Could not fetch PR ${ref.repo}#${ref.num}`);
+            const ghResult = execGh(["pr", "view", String(ref.num), "--repo", ref.repo, "--json", "number"]);
+            const detail = ghResult.success ? "" : `: ${ghResult.stdout}`;
+            cmdCtx.log.error(`Could not fetch PR ${ref.repo}#${ref.num}${detail}`);
           }
           return;
         }
@@ -497,7 +499,9 @@ const plugin: WOPRPlugin = {
           if (issue) {
             cmdCtx.log.info(formatSummary(issue));
           } else {
-            cmdCtx.log.error(`Could not fetch issue ${ref.repo}#${ref.num}`);
+            const ghResult = execGh(["issue", "view", String(ref.num), "--repo", ref.repo, "--json", "number"]);
+            const detail = ghResult.success ? "" : `: ${ghResult.stdout}`;
+            cmdCtx.log.error(`Could not fetch issue ${ref.repo}#${ref.num}${detail}`);
           }
           return;
         }
@@ -512,11 +516,12 @@ const plugin: WOPRPlugin = {
           return;
         }
 
-        cmdCtx.log.info("Usage: wopr github <setup|status|pr|issue|url> [arg]");
+        cmdCtx.log.info("Usage: wopr github <setup|status|pr|issue|webhook|url> [arg]");
         cmdCtx.log.info("");
         cmdCtx.log.info("Commands:");
         cmdCtx.log.info("  status              - Show GitHub integration status");
         cmdCtx.log.info("  setup [org]         - Set up webhooks for configured orgs");
+        cmdCtx.log.info("  webhook [org]       - Alias for setup");
         cmdCtx.log.info("  pr owner/repo#123   - View pull request details");
         cmdCtx.log.info("  issue owner/repo#123 - View issue details");
         cmdCtx.log.info("  url                 - Show webhook URL");
