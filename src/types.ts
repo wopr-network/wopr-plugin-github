@@ -2,6 +2,15 @@
  * WOPR GitHub Plugin Types
  */
 
+/**
+ * Maps GitHub event types to WOPR session names.
+ * Use "*" as a catch-all fallback for unmatched events.
+ *
+ * @example
+ * { "pull_request": "code-review", "issues": "project-mgmt", "*": "default" }
+ */
+export type EventRoutingTable = Record<string, string>;
+
 export interface GitHubConfig {
   /** GitHub organizations to manage */
   orgs?: string[];
@@ -9,6 +18,8 @@ export interface GitHubConfig {
   prReviewSession?: string;
   /** Session to route merge/release events to */
   releaseSession?: string;
+  /** Event-type routing table: maps GitHub event types to WOPR session names */
+  routing?: EventRoutingTable;
 }
 
 export interface WebhookSetupResult {
@@ -16,6 +27,24 @@ export interface WebhookSetupResult {
   webhookUrl?: string;
   webhookId?: number;
   error?: string;
+}
+
+export interface WebhookEvent {
+  /** GitHub event type from X-GitHub-Event header (e.g. "push", "pull_request") */
+  eventType?: string;
+  /** Webhook payload body */
+  payload: Record<string, unknown>;
+  /** GitHub delivery ID from X-GitHub-Delivery header */
+  deliveryId?: string;
+}
+
+export interface WebhookRouteResult {
+  /** Whether routing was successful */
+  routed: boolean;
+  /** Target session the event was routed to */
+  session?: string;
+  /** Reason if not routed */
+  reason?: string;
 }
 
 export interface GitHubExtension {
@@ -27,6 +56,12 @@ export interface GitHubExtension {
 
   /** Check if gh CLI is authenticated */
   isAuthenticated(): Promise<boolean>;
+
+  /** Route an incoming webhook event to the configured session */
+  handleWebhook(event: WebhookEvent): WebhookRouteResult;
+
+  /** Resolve which session an event type maps to (without forwarding) */
+  resolveSession(eventType: string): string | null;
 }
 
 export interface WOPRPluginContext {
