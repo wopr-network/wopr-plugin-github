@@ -4,7 +4,8 @@
   "devDependencies": {
     "@biomejs/biome": "^2.3.14",
     "@types/node": "^20.10.0",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "vitest": "^4.0.18"
   },
   "keywords": [
     "wopr",
@@ -22,7 +23,8 @@
     "dev": "tsc --watch",
     "format": "biome format --write src/",
     "lint": "biome check src/",
-    "lint:fix": "biome check --fix src/"
+    "lint:fix": "biome check --fix src/",
+    "test": "vitest run"
   },
   "type": "module",
   "version": "1.0.0"
