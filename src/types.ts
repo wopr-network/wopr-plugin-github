@@ -31,7 +31,7 @@ export interface WebhookSetupResult {
 
 export interface WebhookEvent {
   /** GitHub event type from X-GitHub-Event header (e.g. "push", "pull_request") */
-  eventType: string;
+  eventType?: string;
   /** Webhook payload body */
   payload: Record<string, unknown>;
   /** GitHub delivery ID from X-GitHub-Delivery header */

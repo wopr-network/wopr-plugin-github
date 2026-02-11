@@ -174,18 +174,20 @@ async function setupOrgWebhook(org: string): Promise<WebhookSetupResult> {
  * 3. Legacy prReviewSession / releaseSession fields
  * 4. null (no route configured)
  */
-function resolveSession(eventType: string): string | null {
+function resolveSessionFromConfig(eventType: string): string | null {
   const config = ctx?.getConfig<GitHubConfig>();
   if (!config) return null;
 
   // 1. Check routing table — exact match
-  if (config.routing?.[eventType]) {
-    return config.routing[eventType];
+  const exactRoute = config.routing?.[eventType];
+  if (typeof exactRoute === "string" && exactRoute.trim() !== "") {
+    return exactRoute;
   }
 
   // 2. Check routing table — wildcard fallback
-  if (config.routing?.["*"]) {
-    return config.routing["*"];
+  const wildcard = config.routing?.["*"];
+  if (typeof wildcard === "string" && wildcard.trim() !== "") {
+    return wildcard;
   }
 
   // 3. Legacy field fallback
@@ -229,7 +231,7 @@ const githubExtension: GitHubExtension = {
       return { routed: false, reason: "Missing event type" };
     }
 
-    const session = resolveSession(eventType);
+    const session = resolveSessionFromConfig(eventType);
     if (!session) {
       ctx?.log.debug?.(`[github] No route for event type: ${eventType} (delivery: ${deliveryId || "unknown"})`);
       return { routed: false, reason: `No session configured for event type: ${eventType}` };
@@ -240,7 +242,7 @@ const githubExtension: GitHubExtension = {
   },
 
   resolveSession(eventType: string): string | null {
-    return resolveSession(eventType);
+    return resolveSessionFromConfig(eventType);
   },
 };
 
