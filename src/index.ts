@@ -13,6 +13,7 @@ import type {
   WOPRPluginContext,
   GitHubConfig,
   GitHubExtension,
+  GitHubItemSummary,
   WebhookSetupResult,
   WebhookEvent,
   WebhookRouteResult,
@@ -208,6 +209,129 @@ function resolveSessionFromConfig(eventType: string): string | null {
 }
 
 // ============================================================================
+// PR / Issue Viewing
+// ============================================================================
+
+/**
+ * Parse "owner/repo#123" into { repo: "owner/repo", num: 123 }.
+ * Only supports the "owner/repo#123" format.
+ */
+function parseRef(input: string): { repo: string; num: number } | null {
+  // owner/repo#123
+  const hashMatch = input.match(/^([^#\s]+)#(\d+)$/);
+  if (hashMatch) {
+    return { repo: hashMatch[1], num: parseInt(hashMatch[2], 10) };
+  }
+  return null;
+}
+
+function truncate(text: string, maxLen: number): string {
+  if (!text) return "";
+  const oneLine = text.replace(/\r?\n/g, " ").trim();
+  if (oneLine.length <= maxLen) return oneLine;
+  return oneLine.slice(0, maxLen - 3) + "...";
+}
+
+const PR_JSON_FIELDS = [
+  "number", "title", "state", "author", "labels", "body", "url",
+  "createdAt", "updatedAt", "mergeable", "reviewDecision",
+  "additions", "deletions", "headRefName", "baseRefName",
+].join(",");
+
+const ISSUE_JSON_FIELDS = [
+  "number", "title", "state", "author", "labels", "body", "url",
+  "createdAt", "updatedAt",
+].join(",");
+
+function viewPr(repo: string, num: number): GitHubItemSummary | null {
+  const result = execGh(["pr", "view", String(num), "--repo", repo, "--json", PR_JSON_FIELDS]);
+  if (!result.success) {
+    ctx?.log.debug?.(`[github] Failed to fetch PR ${repo}#${num}: ${result.stdout}`);
+    return null;
+  }
+
+  try {
+    const data = JSON.parse(result.stdout);
+    return {
+      type: "pr",
+      repo,
+      number: data.number,
+      title: data.title,
+      state: data.state,
+      author: data.author?.login || "unknown",
+      labels: (data.labels || []).map((l: any) => l.name),
+      bodyPreview: truncate(data.body || "", 200),
+      url: data.url,
+      createdAt: data.createdAt,
+      updatedAt: data.updatedAt,
+      mergeable: data.mergeable,
+      reviewDecision: data.reviewDecision,
+      additions: data.additions,
+      deletions: data.deletions,
+      headRef: data.headRefName,
+      baseRef: data.baseRefName,
+    };
+  } catch {
+    ctx?.log.debug?.(`[github] Failed to parse PR response for ${repo}#${num}`);
+    return null;
+  }
+}
+
+function viewIssue(repo: string, num: number): GitHubItemSummary | null {
+  const result = execGh(["issue", "view", String(num), "--repo", repo, "--json", ISSUE_JSON_FIELDS]);
+  if (!result.success) {
+    ctx?.log.debug?.(`[github] Failed to fetch issue ${repo}#${num}: ${result.stdout}`);
+    return null;
+  }
+
+  try {
+    const data = JSON.parse(result.stdout);
+    return {
+      type: "issue",
+      repo,
+      number: data.number,
+      title: data.title,
+      state: data.state,
+      author: data.author?.login || "unknown",
+      labels: (data.labels || []).map((l: any) => l.name),
+      bodyPreview: truncate(data.body || "", 200),
+      url: data.url,
+      createdAt: data.createdAt,
+      updatedAt: data.updatedAt,
+    };
+  } catch {
+    ctx?.log.debug?.(`[github] Failed to parse issue response for ${repo}#${num}`);
+    return null;
+  }
+}
+
+function formatSummary(item: GitHubItemSummary): string {
+  const lines: string[] = [];
+  const typeLabel = item.type === "pr" ? "PR" : "Issue";
+  lines.push(`${typeLabel} #${item.number}: ${item.title}`);
+  lines.push(`  State: ${item.state}  |  Author: ${item.author}`);
+  if (item.labels.length > 0) {
+    lines.push(`  Labels: ${item.labels.join(", ")}`);
+  }
+  if (item.type === "pr") {
+    if (item.headRef && item.baseRef) {
+      lines.push(`  Branch: ${item.headRef} -> ${item.baseRef}`);
+    }
+    if (item.additions !== undefined || item.deletions !== undefined) {
+      lines.push(`  Changes: +${item.additions || 0} / -${item.deletions || 0}`);
+    }
+    if (item.reviewDecision) {
+      lines.push(`  Review: ${item.reviewDecision}`);
+    }
+  }
+  if (item.bodyPreview) {
+    lines.push(`  ${item.bodyPreview}`);
+  }
+  lines.push(`  ${item.url}`);
+  return lines.join("\n");
+}
+
+// ============================================================================
 // Extension
 // ============================================================================
 
@@ -243,6 +367,14 @@ const githubExtension: GitHubExtension = {
 
   resolveSession(eventType: string): string | null {
     return resolveSessionFromConfig(eventType);
+  },
+
+  viewPr(repo: string, num: number): GitHubItemSummary | null {
+    return viewPr(repo, num);
+  },
+
+  viewIssue(repo: string, num: number): GitHubItemSummary | null {
+    return viewIssue(repo, num);
   },
 };
 
@@ -292,7 +424,7 @@ const plugin: WOPRPlugin = {
     {
       name: "github",
       description: "GitHub integration commands",
-      usage: "wopr github <setup|status|webhook> [org]",
+      usage: "wopr github <setup|status|pr|issue|webhook|url> [arg]",
       async handler(cmdCtx, args) {
         const [subcommand, orgArg] = args;
 
@@ -332,6 +464,48 @@ const plugin: WOPRPlugin = {
           return;
         }
 
+        if (subcommand === "pr") {
+          if (!orgArg) {
+            cmdCtx.log.error("Usage: wopr github pr owner/repo#123");
+            return;
+          }
+          const ref = parseRef(orgArg);
+          if (!ref) {
+            cmdCtx.log.error("Invalid format. Use: owner/repo#123");
+            return;
+          }
+          const pr = viewPr(ref.repo, ref.num);
+          if (pr) {
+            cmdCtx.log.info(formatSummary(pr));
+          } else {
+            const ghResult = execGh(["pr", "view", String(ref.num), "--repo", ref.repo, "--json", "number"]);
+            const detail = ghResult.success ? "" : `: ${ghResult.stdout}`;
+            cmdCtx.log.error(`Could not fetch PR ${ref.repo}#${ref.num}${detail}`);
+          }
+          return;
+        }
+
+        if (subcommand === "issue") {
+          if (!orgArg) {
+            cmdCtx.log.error("Usage: wopr github issue owner/repo#123");
+            return;
+          }
+          const ref = parseRef(orgArg);
+          if (!ref) {
+            cmdCtx.log.error("Invalid format. Use: owner/repo#123");
+            return;
+          }
+          const issue = viewIssue(ref.repo, ref.num);
+          if (issue) {
+            cmdCtx.log.info(formatSummary(issue));
+          } else {
+            const ghResult = execGh(["issue", "view", String(ref.num), "--repo", ref.repo, "--json", "number"]);
+            const detail = ghResult.success ? "" : `: ${ghResult.stdout}`;
+            cmdCtx.log.error(`Could not fetch issue ${ref.repo}#${ref.num}${detail}`);
+          }
+          return;
+        }
+
         if (subcommand === "url") {
           const url = await getWebhookUrl();
           if (url) {
@@ -342,12 +516,15 @@ const plugin: WOPRPlugin = {
           return;
         }
 
-        cmdCtx.log.info("Usage: wopr github <setup|status|url> [org]");
+        cmdCtx.log.info("Usage: wopr github <setup|status|pr|issue|webhook|url> [arg]");
         cmdCtx.log.info("");
         cmdCtx.log.info("Commands:");
-        cmdCtx.log.info("  status   - Show GitHub integration status");
-        cmdCtx.log.info("  setup    - Set up webhooks for configured orgs");
-        cmdCtx.log.info("  url      - Show webhook URL");
+        cmdCtx.log.info("  status              - Show GitHub integration status");
+        cmdCtx.log.info("  setup [org]         - Set up webhooks for configured orgs");
+        cmdCtx.log.info("  webhook [org]       - Alias for setup");
+        cmdCtx.log.info("  pr owner/repo#123   - View pull request details");
+        cmdCtx.log.info("  issue owner/repo#123 - View issue details");
+        cmdCtx.log.info("  url                 - Show webhook URL");
       },
     },
   ],
@@ -387,4 +564,4 @@ const plugin: WOPRPlugin = {
 };
 
 export default plugin;
-export type { GitHubExtension, WebhookEvent, WebhookRouteResult };
+export type { GitHubExtension, GitHubItemSummary, WebhookEvent, WebhookRouteResult };

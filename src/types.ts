@@ -47,6 +47,27 @@ export interface WebhookRouteResult {
   reason?: string;
 }
 
+export interface GitHubItemSummary {
+  type: "pr" | "issue";
+  repo: string;
+  number: number;
+  title: string;
+  state: string;
+  author: string;
+  labels: string[];
+  bodyPreview: string;
+  url: string;
+  createdAt: string;
+  updatedAt: string;
+  /** PR-only fields */
+  mergeable?: string;
+  reviewDecision?: string;
+  additions?: number;
+  deletions?: number;
+  headRef?: string;
+  baseRef?: string;
+}
+
 export interface GitHubExtension {
   /** Set up GitHub webhook for an org */
   setupWebhook(org: string): Promise<WebhookSetupResult>;
@@ -62,6 +83,12 @@ export interface GitHubExtension {
 
   /** Resolve which session an event type maps to (without forwarding) */
   resolveSession(eventType: string): string | null;
+
+  /** View PR details */
+  viewPr(repo: string, num: number): GitHubItemSummary | null;
+
+  /** View issue details */
+  viewIssue(repo: string, num: number): GitHubItemSummary | null;
 }
 
 export interface WOPRPluginContext {
