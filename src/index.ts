@@ -14,6 +14,8 @@ import type {
   GitHubConfig,
   GitHubExtension,
   WebhookSetupResult,
+  WebhookEvent,
+  WebhookRouteResult,
   FunnelExtension,
   WebhooksExtension,
 } from "./types.js";
@@ -160,6 +162,50 @@ async function setupOrgWebhook(org: string): Promise<WebhookSetupResult> {
 }
 
 // ============================================================================
+// Event Routing
+// ============================================================================
+
+/**
+ * Resolve which session an event type should route to.
+ *
+ * Priority:
+ * 1. Exact match in routing table (e.g. "pull_request" -> "code-review")
+ * 2. Wildcard "*" in routing table
+ * 3. Legacy prReviewSession / releaseSession fields
+ * 4. null (no route configured)
+ */
+function resolveSession(eventType: string): string | null {
+  const config = ctx?.getConfig<GitHubConfig>();
+  if (!config) return null;
+
+  // 1. Check routing table — exact match
+  if (config.routing?.[eventType]) {
+    return config.routing[eventType];
+  }
+
+  // 2. Check routing table — wildcard fallback
+  if (config.routing?.["*"]) {
+    return config.routing["*"];
+  }
+
+  // 3. Legacy field fallback
+  if (
+    (eventType === "pull_request" || eventType === "pull_request_review") &&
+    config.prReviewSession
+  ) {
+    return config.prReviewSession;
+  }
+  if (
+    (eventType === "release" || eventType === "push") &&
+    config.releaseSession
+  ) {
+    return config.releaseSession;
+  }
+
+  return null;
+}
+
+// ============================================================================
 // Extension
 // ============================================================================
 
@@ -174,6 +220,27 @@ const githubExtension: GitHubExtension = {
 
   async isAuthenticated() {
     return checkGhAuth();
+  },
+
+  handleWebhook(event: WebhookEvent): WebhookRouteResult {
+    const { eventType, deliveryId } = event;
+
+    if (!eventType) {
+      return { routed: false, reason: "Missing event type" };
+    }
+
+    const session = resolveSession(eventType);
+    if (!session) {
+      ctx?.log.debug?.(`[github] No route for event type: ${eventType} (delivery: ${deliveryId || "unknown"})`);
+      return { routed: false, reason: `No session configured for event type: ${eventType}` };
+    }
+
+    ctx?.log.info(`[github] Routing ${eventType} -> session "${session}" (delivery: ${deliveryId || "unknown"})`);
+    return { routed: true, session };
+  },
+
+  resolveSession(eventType: string): string | null {
+    return resolveSession(eventType);
   },
 };
 
@@ -208,6 +275,13 @@ const plugin: WOPRPlugin = {
         type: "string",
         label: "Release Session",
         description: "Session to route merge/release events to",
+      },
+      {
+        name: "routing",
+        type: "object",
+        label: "Event Routing",
+        description:
+          'Map GitHub event types to WOPR sessions. Use "*" as catch-all. Example: { "pull_request": "code-review", "issues": "project-mgmt", "*": "default" }',
       },
     ],
   },
@@ -311,4 +385,4 @@ const plugin: WOPRPlugin = {
 };
 
 export default plugin;
-export type { GitHubExtension };
+export type { GitHubExtension, WebhookEvent, WebhookRouteResult };
