@@ -16,7 +16,7 @@
   ],
   "license": "MIT",
   "main": "dist/index.js",
-  "name": "wopr-plugin-github",
+  "name": "@wopr-network/wopr-plugin-github",
   "scripts": {
     "build": "tsc",
     "check": "biome check src/ && tsc --noEmit",
@@ -24,11 +24,18 @@
     "format": "biome format --write src/",
     "lint": "biome check src/",
     "lint:fix": "biome check --fix src/",
-    "test": "vitest run"
+    "test": "vitest run",
+    "prepublishOnly": "npm run build"
   },
   "type": "module",
   "version": "1.0.0",
   "dependencies": {
     "@wopr-network/plugin-types": "^0.1.0"
-  }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist"
+  ]
 }
