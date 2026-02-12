@@ -121,6 +121,13 @@ async function getWebhookUrl(): Promise<string | null> {
 }
 
 async function setupOrgWebhook(org: string): Promise<WebhookSetupResult> {
+	if (!isValidOrg(org)) {
+		return {
+			success: false,
+			error: `Invalid org name: "${org}". Only alphanumeric characters and hyphens are allowed.`,
+		};
+	}
+
 	// Check gh auth
 	if (!(await checkGhAuth())) {
 		return {
@@ -234,7 +241,13 @@ async function setupOrgWebhook(org: string): Promise<WebhookSetupResult> {
  * Find an org webhook by its config URL. Returns the hook ID or null.
  */
 function findOrgWebhookByUrl(org: string, url: string): number | null {
-	const listArgs = ["api", `orgs/${org}/hooks`, "--jq", ".[] | .id,.config.url"];
+	if (!isValidOrg(org)) return null;
+	const listArgs = [
+		"api",
+		`orgs/${org}/hooks`,
+		"--jq",
+		".[] | .id,.config.url",
+	];
 	const listResult = execGh(listArgs);
 	if (listResult.success && listResult.stdout) {
 		const lines = listResult.stdout.split("\n");
@@ -254,8 +267,14 @@ function findAnyOrgWebhook(
 	org: string,
 	basePath: string,
 ): { id: number; url: string } | null {
+	if (!isValidOrg(org)) return null;
 	const suffix = `${basePath}/github`;
-	const listArgs = ["api", `orgs/${org}/hooks`, "--jq", ".[] | .id,.config.url"];
+	const listArgs = [
+		"api",
+		`orgs/${org}/hooks`,
+		"--jq",
+		".[] | .id,.config.url",
+	];
 	const listResult = execGh(listArgs);
 	if (listResult.success && listResult.stdout) {
 		const lines = listResult.stdout.split("\n");
@@ -278,6 +297,13 @@ async function updateOrgWebhook(
 	oldHostname: string,
 	newHostname: string,
 ): Promise<WebhookSetupResult> {
+	if (!isValidOrg(org)) {
+		return {
+			success: false,
+			error: `Invalid org name: "${org}". Only alphanumeric characters and hyphens are allowed.`,
+		};
+	}
+
 	if (!(await checkGhAuth())) {
 		return {
 			success: false,
@@ -339,7 +365,12 @@ async function updateOrgWebhook(
  * Find a repo-level webhook by URL. Returns the hook ID or null.
  */
 function findRepoWebhookByUrl(repo: string, url: string): number | null {
-	const listArgs = ["api", `repos/${repo}/hooks`, "--jq", ".[] | .id,.config.url"];
+	const listArgs = [
+		"api",
+		`repos/${repo}/hooks`,
+		"--jq",
+		".[] | .id,.config.url",
+	];
 	const listResult = execGh(listArgs);
 	if (listResult.success && listResult.stdout) {
 		const lines = listResult.stdout.split("\n");
@@ -484,6 +515,14 @@ function loadSubscriptions(): void {
 			persistSubscriptions();
 		}
 	}
+}
+
+/**
+ * Validate GitHub org name: alphanumeric and hyphens only.
+ * Prevents path traversal in API paths like `orgs/${org}/hooks`.
+ */
+function isValidOrg(org: string): boolean {
+	return /^[a-zA-Z0-9-]+$/.test(org);
 }
 
 /**
@@ -1066,6 +1105,12 @@ const plugin: WOPRPluginWithConfig = {
 					}
 
 					for (const org of orgs) {
+						if (!isValidOrg(org)) {
+							cmdCtx.log.error(
+								`Invalid org name: "${org}". Only alphanumeric characters and hyphens are allowed.`,
+							);
+							continue;
+						}
 						cmdCtx.log.info(`Setting up webhook for ${org}...`);
 						const result = await setupOrgWebhook(org);
 						if (result.success) {

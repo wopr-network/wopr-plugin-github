@@ -846,6 +846,94 @@ describe("wopr-plugin-github", () => {
   });
 
   // ========================================================================
+  // Org parameter validation (WOP-236)
+  // ========================================================================
+
+  describe("org parameter validation", () => {
+    async function initWithExtensions() {
+      mockExecSync("ok");
+      const ctx = makeCtx({ orgs: ["test-org"] });
+      extensions["funnel"] = {
+        getHostname: async () => "my-host.ts.net",
+      };
+      extensions["webhooks"] = {
+        getConfig: () => ({ basePath: "/hooks", token: "secret123" }),
+      };
+      await plugin.init!(ctx);
+      return getGitHubExtension();
+    }
+
+    it("rejects org with path traversal characters", async () => {
+      const ext = await initWithExtensions();
+      const result = await ext.setupWebhook("../repos/target");
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("Invalid org name");
+    });
+
+    it("rejects org with slashes", async () => {
+      const ext = await initWithExtensions();
+      const result = await ext.setupWebhook("org/subpath");
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("Invalid org name");
+    });
+
+    it("rejects org with dots", async () => {
+      const ext = await initWithExtensions();
+      const result = await ext.setupWebhook("org.name");
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("Invalid org name");
+    });
+
+    it("rejects org with spaces", async () => {
+      const ext = await initWithExtensions();
+      const result = await ext.setupWebhook("org name");
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("Invalid org name");
+    });
+
+    it("rejects empty org", async () => {
+      const ext = await initWithExtensions();
+      const result = await ext.setupWebhook("");
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("Invalid org name");
+    });
+
+    it("accepts valid org with alphanumeric and hyphens", async () => {
+      const ext = await initWithExtensions();
+      // Auth will fail, but we get past the validation
+      mockExecSyncError("not logged in");
+      const result = await ext.setupWebhook("my-valid-org-123");
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("not authenticated");
+    });
+
+    it("rejects invalid org in updateWebhook", async () => {
+      const ext = await initWithExtensions();
+      mockExecSync("ok"); // auth
+      const result = await ext.updateWebhook(
+        "../evil",
+        "old-host.ts.net",
+        "new-host.ts.net",
+      );
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("Invalid org name");
+    });
+
+    it("rejects invalid org in command handler setup", async () => {
+      mockExecSync("ok");
+      const ctx = makeCtx({});
+      await plugin.init!(ctx);
+
+      const handler = plugin.commands![0].handler;
+      await handler(ctx, ["setup", "../evil-org"]);
+
+      expect(ctx.log.error).toHaveBeenCalledWith(
+        expect.stringContaining("Invalid org name"),
+      );
+    });
+  });
+
+  // ========================================================================
   // Command handler
   // ========================================================================
 
