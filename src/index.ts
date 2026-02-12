@@ -233,16 +233,14 @@ async function setupOrgWebhook(org: string): Promise<WebhookSetupResult> {
  * Find an org webhook by its config URL. Returns the hook ID or null.
  */
 function findOrgWebhookByUrl(org: string, url: string): number | null {
-	const listArgs = [
-		"api",
-		`orgs/${org}/hooks`,
-		"--jq",
-		`.[] | select(.config.url == "${url}") | .id`,
-	];
+	const listArgs = ["api", `orgs/${org}/hooks`, "--jq", ".[] | .id,.config.url"];
 	const listResult = execGh(listArgs);
 	if (listResult.success && listResult.stdout) {
-		const id = parseInt(listResult.stdout.split("\n")[0], 10);
-		if (!Number.isNaN(id)) return id;
+		const lines = listResult.stdout.split("\n");
+		for (let i = 0; i < lines.length - 1; i += 2) {
+			const id = parseInt(lines[i], 10);
+			if (!Number.isNaN(id) && lines[i + 1] === url) return id;
+		}
 	}
 	return null;
 }
@@ -256,20 +254,16 @@ function findAnyOrgWebhook(
 	basePath: string,
 ): { id: number; url: string } | null {
 	const suffix = `${basePath}/github`;
-	const listArgs = [
-		"api",
-		`orgs/${org}/hooks`,
-		"--jq",
-		`.[] | select(.config.url | endswith("${suffix}")) | "\\(.id) \\(.config.url)"`,
-	];
+	const listArgs = ["api", `orgs/${org}/hooks`, "--jq", ".[] | .id,.config.url"];
 	const listResult = execGh(listArgs);
 	if (listResult.success && listResult.stdout) {
-		const line = listResult.stdout.split("\n")[0];
-		const spaceIdx = line.indexOf(" ");
-		if (spaceIdx > 0) {
-			const id = parseInt(line.slice(0, spaceIdx), 10);
-			const url = line.slice(spaceIdx + 1);
-			if (!Number.isNaN(id) && url) return { id, url };
+		const lines = listResult.stdout.split("\n");
+		for (let i = 0; i < lines.length - 1; i += 2) {
+			const id = parseInt(lines[i], 10);
+			const hookUrl = lines[i + 1];
+			if (!Number.isNaN(id) && hookUrl && hookUrl.endsWith(suffix)) {
+				return { id, url: hookUrl };
+			}
 		}
 	}
 	return null;
@@ -283,6 +277,13 @@ async function updateOrgWebhook(
 	oldHostname: string,
 	newHostname: string,
 ): Promise<WebhookSetupResult> {
+	if (!(await checkGhAuth())) {
+		return {
+			success: false,
+			error: "gh CLI not authenticated. Run 'gh auth login' first.",
+		};
+	}
+
 	const webhooks = getWebhooksExtension();
 	const webhooksConfig = webhooks?.getConfig();
 	if (!webhooksConfig) {
@@ -290,6 +291,17 @@ async function updateOrgWebhook(
 	}
 
 	const oldUrl = `https://${oldHostname}${webhooksConfig.basePath}/github`;
+	const newUrl = `https://${newHostname}${webhooksConfig.basePath}/github`;
+
+	// Check if webhook was already updated to newUrl (idempotent for repeat events)
+	const alreadyUpdated = findOrgWebhookByUrl(org, newUrl);
+	if (alreadyUpdated) {
+		ctx?.log.info(
+			`Webhook ${alreadyUpdated} for ${org} already points to ${newUrl}`,
+		);
+		return { success: true, webhookUrl: newUrl, webhookId: alreadyUpdated };
+	}
+
 	const hookId = findOrgWebhookByUrl(org, oldUrl);
 	if (!hookId) {
 		return {
@@ -298,7 +310,6 @@ async function updateOrgWebhook(
 		};
 	}
 
-	const newUrl = `https://${newHostname}${webhooksConfig.basePath}/github`;
 	const patchArgs = [
 		"api",
 		`orgs/${org}/hooks/${hookId}`,
@@ -327,16 +338,14 @@ async function updateOrgWebhook(
  * Find a repo-level webhook by URL. Returns the hook ID or null.
  */
 function findRepoWebhookByUrl(repo: string, url: string): number | null {
-	const listArgs = [
-		"api",
-		`repos/${repo}/hooks`,
-		"--jq",
-		`.[] | select(.config.url == "${url}") | .id`,
-	];
+	const listArgs = ["api", `repos/${repo}/hooks`, "--jq", ".[] | .id,.config.url"];
 	const listResult = execGh(listArgs);
 	if (listResult.success && listResult.stdout) {
-		const id = parseInt(listResult.stdout.split("\n")[0], 10);
-		if (!Number.isNaN(id)) return id;
+		const lines = listResult.stdout.split("\n");
+		for (let i = 0; i < lines.length - 1; i += 2) {
+			const id = parseInt(lines[i], 10);
+			if (!Number.isNaN(id) && lines[i + 1] === url) return id;
+		}
 	}
 	return null;
 }
@@ -356,6 +365,17 @@ async function updateRepoWebhook(
 	}
 
 	const oldUrl = `https://${oldHostname}${webhooksConfig.basePath}/github`;
+	const newUrl = `https://${newHostname}${webhooksConfig.basePath}/github`;
+
+	// Check if webhook was already updated to newUrl (idempotent for repeat events)
+	const alreadyUpdated = findRepoWebhookByUrl(repo, newUrl);
+	if (alreadyUpdated) {
+		ctx?.log.info(
+			`Repo webhook ${alreadyUpdated} for ${repo} already points to ${newUrl}`,
+		);
+		return { success: true, webhookUrl: newUrl, webhookId: alreadyUpdated };
+	}
+
 	const hookId = findRepoWebhookByUrl(repo, oldUrl);
 	if (!hookId) {
 		return {
@@ -364,7 +384,6 @@ async function updateRepoWebhook(
 		};
 	}
 
-	const newUrl = `https://${newHostname}${webhooksConfig.basePath}/github`;
 	const patchArgs = [
 		"api",
 		`repos/${repo}/hooks/${hookId}`,
@@ -518,29 +537,20 @@ async function subscribeRepo(
 	const events = options?.events ?? DEFAULT_REPO_EVENTS;
 
 	// Check if webhook already exists on this repo pointing to our URL
-	const listArgs = [
-		"api",
-		`repos/${repo}/hooks`,
-		"--jq",
-		`.[] | select(.config.url == "${webhookUrl}") | .id`,
-	];
-	const listResult = execGh(listArgs);
-	if (listResult.success && listResult.stdout) {
-		const existingId = parseInt(listResult.stdout.split("\n")[0], 10);
-		if (!Number.isNaN(existingId)) {
-			// Webhook exists on GitHub but not in our tracking -- adopt it
-			const sub: RepoSubscription = {
-				repo,
-				webhookId: existingId,
-				events,
-				session: options?.session,
-				createdAt: new Date().toISOString(),
-			};
-			subscriptions.set(repo, sub);
-			persistSubscriptions();
-			ctx?.log.info(`Adopted existing webhook for ${repo}: ID ${existingId}`);
-			return { success: true, webhookUrl, webhookId: existingId };
-		}
+	const existingId = findRepoWebhookByUrl(repo, webhookUrl);
+	if (existingId) {
+		// Webhook exists on GitHub but not in our tracking -- adopt it
+		const sub: RepoSubscription = {
+			repo,
+			webhookId: existingId,
+			events,
+			session: options?.session,
+			createdAt: new Date().toISOString(),
+		};
+		subscriptions.set(repo, sub);
+		persistSubscriptions();
+		ctx?.log.info(`Adopted existing webhook for ${repo}: ID ${existingId}`);
+		return { success: true, webhookUrl, webhookId: existingId };
 	}
 
 	// Create repo-level webhook
@@ -1264,6 +1274,16 @@ const plugin: WOPRPlugin = {
 		// Subscribe to webhooks:ready — auto-setup org webhooks when infrastructure is available
 		// Use pluginCtx (the init parameter) in closures — guaranteed non-null unlike module-level ctx
 		if (pluginCtx.events) {
+			// Unsubscribe any existing handlers to prevent leaks if init() called twice
+			if (webhooksReadyHandler) {
+				pluginCtx.events.off("webhooks:ready", webhooksReadyHandler);
+				webhooksReadyHandler = null;
+			}
+			if (hostnameChangedHandler) {
+				pluginCtx.events.off("funnel:hostname-changed", hostnameChangedHandler);
+				hostnameChangedHandler = null;
+			}
+
 			webhooksReadyHandler = async () => {
 				const url = await getWebhookUrl();
 				if (url && config?.orgs?.length) {

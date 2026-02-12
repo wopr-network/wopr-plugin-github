@@ -730,8 +730,8 @@ describe("wopr-plugin-github", () => {
 
       // auth check succeeds
       mockExecSync("ok");
-      // list hooks returns existing webhook ID
-      mockSpawnSync("12345");
+      // findOrgWebhookByUrl — exact match (alternating id/url lines)
+      mockSpawnSync("12345\nhttps://my-host.ts.net/hooks/github");
 
       const result = await ext.setupWebhook("test-org");
       expect(result.success).toBe(true);
@@ -1238,16 +1238,28 @@ describe("wopr-plugin-github", () => {
     it("finds and patches an existing webhook by old URL", async () => {
       const ext = await initWithExtensions();
 
-      // spawnSync call 1: findOrgWebhookByUrl — finds hook 999
-      // spawnSync call 2: PATCH — returns 999
+      // auth check succeeds
+      mockExecSync("ok");
+      // spawnSync call 1: findOrgWebhookByUrl(newUrl) — no match (not already updated)
+      // spawnSync call 2: findOrgWebhookByUrl(oldUrl) — finds hook 999
+      // spawnSync call 3: PATCH — returns 999
       vi.mocked(spawnSync)
         .mockReturnValueOnce({
-          stdout: "999",
+          stdout: "",
           stderr: "",
           status: 0,
           signal: null,
           pid: 1,
-          output: [null, "999", ""],
+          output: [null, "", ""],
+          error: undefined,
+        } as SpawnSyncReturns<string>)
+        .mockReturnValueOnce({
+          stdout: "999\nhttps://old-host.ts.net/hooks/github",
+          stderr: "",
+          status: 0,
+          signal: null,
+          pid: 1,
+          output: [null, "999\nhttps://old-host.ts.net/hooks/github", ""],
           error: undefined,
         } as SpawnSyncReturns<string>)
         .mockReturnValueOnce({
@@ -1275,8 +1287,29 @@ describe("wopr-plugin-github", () => {
     it("returns error when no existing webhook found", async () => {
       const ext = await initWithExtensions();
 
-      // findOrgWebhookByUrl — no match
-      mockSpawnSync("", 0);
+      // auth check succeeds
+      mockExecSync("ok");
+      // spawnSync call 1: findOrgWebhookByUrl(newUrl) — no match
+      // spawnSync call 2: findOrgWebhookByUrl(oldUrl) — no match
+      vi.mocked(spawnSync)
+        .mockReturnValueOnce({
+          stdout: "",
+          stderr: "",
+          status: 0,
+          signal: null,
+          pid: 1,
+          output: [null, "", ""],
+          error: undefined,
+        } as SpawnSyncReturns<string>)
+        .mockReturnValueOnce({
+          stdout: "",
+          stderr: "",
+          status: 0,
+          signal: null,
+          pid: 1,
+          output: [null, "", ""],
+          error: undefined,
+        } as SpawnSyncReturns<string>);
 
       const result = await ext.updateWebhook(
         "test-org",
@@ -1290,15 +1323,28 @@ describe("wopr-plugin-github", () => {
     it("returns error when PATCH fails", async () => {
       const ext = await initWithExtensions();
 
-      // find: returns hook 999, patch: fails
+      // auth check succeeds
+      mockExecSync("ok");
+      // spawnSync call 1: findOrgWebhookByUrl(newUrl) — no match
+      // spawnSync call 2: findOrgWebhookByUrl(oldUrl) — finds hook 999
+      // spawnSync call 3: PATCH — fails
       vi.mocked(spawnSync)
         .mockReturnValueOnce({
-          stdout: "999",
+          stdout: "",
           stderr: "",
           status: 0,
           signal: null,
           pid: 1,
-          output: [null, "999", ""],
+          output: [null, "", ""],
+          error: undefined,
+        } as SpawnSyncReturns<string>)
+        .mockReturnValueOnce({
+          stdout: "999\nhttps://old-host.ts.net/hooks/github",
+          stderr: "",
+          status: 0,
+          signal: null,
+          pid: 1,
+          output: [null, "999\nhttps://old-host.ts.net/hooks/github", ""],
           error: undefined,
         } as SpawnSyncReturns<string>)
         .mockReturnValueOnce({
@@ -1326,6 +1372,9 @@ describe("wopr-plugin-github", () => {
       // No webhooks extension
       await plugin.init!(ctx);
       const ext = getGitHubExtension();
+
+      // auth check succeeds
+      mockExecSync("ok");
 
       const result = await ext.updateWebhook(
         "test-org",
@@ -1356,7 +1405,7 @@ describe("wopr-plugin-github", () => {
 
       mockExecSync("ok"); // auth
       // spawnSync call 1: findOrgWebhookByUrl — no exact match
-      // spawnSync call 2: findAnyOrgWebhook — finds stale hook 555
+      // spawnSync call 2: findAnyOrgWebhook — finds stale hook 555 (alternating id/url lines)
       // spawnSync call 3: PATCH — returns 555
       vi.mocked(spawnSync)
         .mockReturnValueOnce({
@@ -1369,14 +1418,14 @@ describe("wopr-plugin-github", () => {
           error: undefined,
         } as SpawnSyncReturns<string>)
         .mockReturnValueOnce({
-          stdout: "555 https://old-host.ts.net/hooks/github",
+          stdout: "555\nhttps://old-host.ts.net/hooks/github",
           stderr: "",
           status: 0,
           signal: null,
           pid: 1,
           output: [
             null,
-            "555 https://old-host.ts.net/hooks/github",
+            "555\nhttps://old-host.ts.net/hooks/github",
             "",
           ],
           error: undefined,
@@ -1434,7 +1483,8 @@ describe("wopr-plugin-github", () => {
       // Simulate webhooks:ready event
       // setupOrgWebhook will call: auth (execSync), findOrgWebhookByUrl (spawnSync)
       mockExecSync("ok");
-      mockSpawnSync("12345"); // findOrgWebhookByUrl returns existing
+      // findOrgWebhookByUrl returns existing (alternating id/url lines)
+      mockSpawnSync("12345\nhttps://my-host.ts.net/hooks/github");
 
       await listeners["webhooks:ready"][0]();
 
@@ -1471,15 +1521,26 @@ describe("wopr-plugin-github", () => {
       expect(listeners["funnel:hostname-changed"]).toBeDefined();
 
       // Simulate hostname change
-      // updateOrgWebhook calls: findOrgWebhookByUrl (spawnSync), PATCH (spawnSync)
+      // updateOrgWebhook calls: checkGhAuth (execSync), findOrgWebhookByUrl(newUrl),
+      //   findOrgWebhookByUrl(oldUrl), PATCH (spawnSync)
+      mockExecSync("ok"); // auth check
       vi.mocked(spawnSync)
         .mockReturnValueOnce({
-          stdout: "777",
+          stdout: "",
           stderr: "",
           status: 0,
           signal: null,
           pid: 1,
-          output: [null, "777", ""],
+          output: [null, "", ""],
+          error: undefined,
+        } as SpawnSyncReturns<string>)
+        .mockReturnValueOnce({
+          stdout: "777\nhttps://old-host.ts.net/hooks/github",
+          stderr: "",
+          status: 0,
+          signal: null,
+          pid: 1,
+          output: [null, "777\nhttps://old-host.ts.net/hooks/github", ""],
           error: undefined,
         } as SpawnSyncReturns<string>)
         .mockReturnValueOnce({
@@ -1559,8 +1620,8 @@ describe("wopr-plugin-github", () => {
 
       // auth check succeeds
       mockExecSync("ok");
-      // findOrgWebhookByUrl finds exact match
-      mockSpawnSync("12345");
+      // findOrgWebhookByUrl finds exact match (alternating id/url lines)
+      mockSpawnSync("12345\nhttps://my-host.ts.net/hooks/github");
 
       await handler(ctx, ["status"]);
 
@@ -1582,8 +1643,8 @@ describe("wopr-plugin-github", () => {
       await plugin.init!(ctx);
 
       mockExecSync("ok"); // auth
-      // findOrgWebhookByUrl — no exact match
-      // findAnyOrgWebhook — finds stale
+      // findOrgWebhookByUrl — no exact match (alternating id/url format, empty = no match)
+      // findAnyOrgWebhook — finds stale (alternating id/url format)
       vi.mocked(spawnSync)
         .mockReturnValueOnce({
           stdout: "",
@@ -1595,14 +1656,14 @@ describe("wopr-plugin-github", () => {
           error: undefined,
         } as SpawnSyncReturns<string>)
         .mockReturnValueOnce({
-          stdout: "444 https://old-host.ts.net/hooks/github",
+          stdout: "444\nhttps://old-host.ts.net/hooks/github",
           stderr: "",
           status: 0,
           signal: null,
           pid: 1,
           output: [
             null,
-            "444 https://old-host.ts.net/hooks/github",
+            "444\nhttps://old-host.ts.net/hooks/github",
             "",
           ],
           error: undefined,
