@@ -11,7 +11,9 @@ import { execSync, spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { WOPRPluginContext } from "@wopr-network/plugin-types";
 import type {
+	CustomEventEmitter,
 	FunnelExtension,
 	GitHubConfig,
 	GitHubExtension,
@@ -21,8 +23,7 @@ import type {
 	WebhookRouteResult,
 	WebhookSetupResult,
 	WebhooksExtension,
-	WOPRPlugin,
-	WOPRPluginContext,
+	WOPRPluginWithConfig,
 } from "./types.js";
 
 // ============================================================================
@@ -956,7 +957,7 @@ const githubExtension: GitHubExtension = {
 // Plugin
 // ============================================================================
 
-const plugin: WOPRPlugin = {
+const plugin: WOPRPluginWithConfig = {
 	name: "wopr-plugin-github",
 	version: "1.0.0",
 	description: "GitHub integration - webhooks, PRs, repo management",
@@ -973,7 +974,7 @@ const plugin: WOPRPlugin = {
 			},
 			{
 				name: "prReviewSession",
-				type: "string",
+				type: "text",
 				label: "PR Review Session",
 				description: "Session to route PR events to",
 				default:
@@ -981,7 +982,7 @@ const plugin: WOPRPlugin = {
 			},
 			{
 				name: "releaseSession",
-				type: "string",
+				type: "text",
 				label: "Release Session",
 				description: "Session to route merge/release events to",
 			},
@@ -1274,13 +1275,16 @@ const plugin: WOPRPlugin = {
 		// Subscribe to webhooks:ready — auto-setup org webhooks when infrastructure is available
 		// Use pluginCtx (the init parameter) in closures — guaranteed non-null unlike module-level ctx
 		if (pluginCtx.events) {
+			// Cast to CustomEventEmitter for custom inter-plugin event names
+			const events = pluginCtx.events as unknown as CustomEventEmitter;
+
 			// Unsubscribe any existing handlers to prevent leaks if init() called twice
 			if (webhooksReadyHandler) {
-				pluginCtx.events.off("webhooks:ready", webhooksReadyHandler);
+				events.off("webhooks:ready", webhooksReadyHandler);
 				webhooksReadyHandler = null;
 			}
 			if (hostnameChangedHandler) {
-				pluginCtx.events.off("funnel:hostname-changed", hostnameChangedHandler);
+				events.off("funnel:hostname-changed", hostnameChangedHandler);
 				hostnameChangedHandler = null;
 			}
 
@@ -1304,7 +1308,7 @@ const plugin: WOPRPlugin = {
 					}
 				}
 			};
-			pluginCtx.events.on("webhooks:ready", webhooksReadyHandler);
+			events.on("webhooks:ready", webhooksReadyHandler);
 
 			// Subscribe to funnel:hostname-changed — update all existing webhooks
 			hostnameChangedHandler = async (event: {
@@ -1354,7 +1358,7 @@ const plugin: WOPRPlugin = {
 					}
 				}
 			};
-			pluginCtx.events.on("funnel:hostname-changed", hostnameChangedHandler);
+			events.on("funnel:hostname-changed", hostnameChangedHandler);
 		}
 
 		// Log configured orgs
@@ -1375,12 +1379,13 @@ const plugin: WOPRPlugin = {
 	async shutdown() {
 		// Unsubscribe from events
 		if (ctx?.events) {
+			const events = ctx.events as unknown as CustomEventEmitter;
 			if (webhooksReadyHandler) {
-				ctx.events.off("webhooks:ready", webhooksReadyHandler);
+				events.off("webhooks:ready", webhooksReadyHandler);
 				webhooksReadyHandler = null;
 			}
 			if (hostnameChangedHandler) {
-				ctx.events.off("funnel:hostname-changed", hostnameChangedHandler);
+				events.off("funnel:hostname-changed", hostnameChangedHandler);
 				hostnameChangedHandler = null;
 			}
 		}
