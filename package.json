@@ -27,5 +27,8 @@
     "test": "vitest run"
   },
   "type": "module",
-  "version": "1.0.0"
+  "version": "1.0.0",
+  "dependencies": {
+    "@wopr-network/plugin-types": "github:wopr-network/wopr-plugin-types"
+  }
 }

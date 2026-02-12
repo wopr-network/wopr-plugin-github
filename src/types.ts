@@ -1,6 +1,11 @@
 /**
  * WOPR GitHub Plugin Types
+ *
+ * Shared types (WOPRPlugin, WOPRPluginContext, etc.) are imported from
+ * @wopr-network/plugin-types. This file contains only GitHub-specific types.
  */
+
+import type { ConfigSchema, WOPRPlugin } from "@wopr-network/plugin-types";
 
 /**
  * Maps GitHub event types to WOPR session names.
@@ -125,52 +130,23 @@ export interface GitHubExtension {
 	listSubscriptions(): RepoSubscription[];
 }
 
-/** Minimal event emitter interface for inter-plugin communication */
-export interface PluginEventEmitter {
+/**
+ * Extension of WOPRPlugin that includes configSchema for backward compatibility.
+ * The shared WOPRPlugin type uses `manifest` instead, but existing plugins
+ * still use the inline configSchema format.
+ */
+export interface WOPRPluginWithConfig extends WOPRPlugin {
+	configSchema?: ConfigSchema;
+}
+
+/**
+ * Minimal event emitter for custom inter-plugin events.
+ * Used to subscribe to custom event names (e.g. "webhooks:ready")
+ * that are not part of the core WOPREventMap.
+ */
+export interface CustomEventEmitter {
 	on(event: string, listener: (...args: any[]) => void): void;
 	off(event: string, listener: (...args: any[]) => void): void;
-}
-
-export interface WOPRPluginContext {
-	log: {
-		info(msg: string): void;
-		warn(msg: string): void;
-		error(msg: string): void;
-		debug?(msg: string): void;
-	};
-	/** Event bus for inter-plugin communication */
-	events?: PluginEventEmitter;
-	getConfig<T>(): T | undefined;
-	getMainConfig<T>(key: string): T | undefined;
-	registerExtension(name: string, extension: unknown): void;
-	unregisterExtension(name: string): void;
-	getExtension(name: string): unknown;
-}
-
-export interface WOPRPlugin {
-	name: string;
-	version: string;
-	description?: string;
-	configSchema?: {
-		title: string;
-		description: string;
-		fields: Array<{
-			name: string;
-			type: string;
-			label?: string;
-			description?: string;
-			required?: boolean;
-			default?: unknown;
-		}>;
-	};
-	commands?: Array<{
-		name: string;
-		description: string;
-		usage?: string;
-		handler: (ctx: WOPRPluginContext, args: string[]) => Promise<void>;
-	}>;
-	init?(ctx: WOPRPluginContext): Promise<void>;
-	shutdown?(): Promise<void>;
 }
 
 export interface FunnelExtension {
