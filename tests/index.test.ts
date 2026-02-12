@@ -754,9 +754,19 @@ describe("wopr-plugin-github", () => {
 
       // auth check succeeds
       mockExecSync("ok");
-      // First spawnSync: list hooks returns empty (no existing hook)
-      // Second spawnSync: create hook returns new ID
+      // spawnSync call 1: findOrgWebhookByUrl — no exact match
+      // spawnSync call 2: findAnyOrgWebhook — no stale webhook
+      // spawnSync call 3: create hook returns new ID
       vi.mocked(spawnSync)
+        .mockReturnValueOnce({
+          stdout: "",
+          stderr: "",
+          status: 0,
+          signal: null,
+          pid: 1,
+          output: [null, "", ""],
+          error: undefined,
+        } as SpawnSyncReturns<string>)
         .mockReturnValueOnce({
           stdout: "",
           stderr: "",
@@ -797,8 +807,19 @@ describe("wopr-plugin-github", () => {
       const ext = getGitHubExtension();
 
       mockExecSync("ok"); // auth
-      // list: no existing, create: fails
+      // spawnSync call 1: findOrgWebhookByUrl — no exact match
+      // spawnSync call 2: findAnyOrgWebhook — no stale webhook
+      // spawnSync call 3: create — fails
       vi.mocked(spawnSync)
+        .mockReturnValueOnce({
+          stdout: "",
+          stderr: "",
+          status: 0,
+          signal: null,
+          pid: 1,
+          output: [null, "", ""],
+          error: undefined,
+        } as SpawnSyncReturns<string>)
         .mockReturnValueOnce({
           stdout: "",
           stderr: "",
@@ -1192,6 +1213,447 @@ describe("wopr-plugin-github", () => {
         "gh",
         expect.arrayContaining(["pr", "view", "42", "--repo", "owner/repo"]),
         expect.any(Object)
+      );
+    });
+  });
+
+  // ========================================================================
+  // updateWebhook
+  // ========================================================================
+
+  describe("updateWebhook", () => {
+    async function initWithExtensions() {
+      mockExecSync("ok");
+      const ctx = makeCtx({ orgs: ["test-org"] });
+      extensions["funnel"] = {
+        getHostname: async () => "new-host.ts.net",
+      };
+      extensions["webhooks"] = {
+        getConfig: () => ({ basePath: "/hooks", token: "secret123" }),
+      };
+      await plugin.init!(ctx);
+      return getGitHubExtension();
+    }
+
+    it("finds and patches an existing webhook by old URL", async () => {
+      const ext = await initWithExtensions();
+
+      // spawnSync call 1: findOrgWebhookByUrl — finds hook 999
+      // spawnSync call 2: PATCH — returns 999
+      vi.mocked(spawnSync)
+        .mockReturnValueOnce({
+          stdout: "999",
+          stderr: "",
+          status: 0,
+          signal: null,
+          pid: 1,
+          output: [null, "999", ""],
+          error: undefined,
+        } as SpawnSyncReturns<string>)
+        .mockReturnValueOnce({
+          stdout: "999",
+          stderr: "",
+          status: 0,
+          signal: null,
+          pid: 1,
+          output: [null, "999", ""],
+          error: undefined,
+        } as SpawnSyncReturns<string>);
+
+      const result = await ext.updateWebhook(
+        "test-org",
+        "old-host.ts.net",
+        "new-host.ts.net",
+      );
+      expect(result.success).toBe(true);
+      expect(result.webhookId).toBe(999);
+      expect(result.webhookUrl).toBe(
+        "https://new-host.ts.net/hooks/github",
+      );
+    });
+
+    it("returns error when no existing webhook found", async () => {
+      const ext = await initWithExtensions();
+
+      // findOrgWebhookByUrl — no match
+      mockSpawnSync("", 0);
+
+      const result = await ext.updateWebhook(
+        "test-org",
+        "old-host.ts.net",
+        "new-host.ts.net",
+      );
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("No existing webhook found");
+    });
+
+    it("returns error when PATCH fails", async () => {
+      const ext = await initWithExtensions();
+
+      // find: returns hook 999, patch: fails
+      vi.mocked(spawnSync)
+        .mockReturnValueOnce({
+          stdout: "999",
+          stderr: "",
+          status: 0,
+          signal: null,
+          pid: 1,
+          output: [null, "999", ""],
+          error: undefined,
+        } as SpawnSyncReturns<string>)
+        .mockReturnValueOnce({
+          stdout: "",
+          stderr: "403 Forbidden",
+          status: 1,
+          signal: null,
+          pid: 1,
+          output: [null, "", "403 Forbidden"],
+          error: undefined,
+        } as SpawnSyncReturns<string>);
+
+      const result = await ext.updateWebhook(
+        "test-org",
+        "old-host.ts.net",
+        "new-host.ts.net",
+      );
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("Failed to update webhook");
+    });
+
+    it("returns error when webhooks extension not configured", async () => {
+      mockExecSync("ok");
+      const ctx = makeCtx({ orgs: ["test-org"] });
+      // No webhooks extension
+      await plugin.init!(ctx);
+      const ext = getGitHubExtension();
+
+      const result = await ext.updateWebhook(
+        "test-org",
+        "old-host.ts.net",
+        "new-host.ts.net",
+      );
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("not configured");
+    });
+  });
+
+  // ========================================================================
+  // Idempotent setup — stale webhook update
+  // ========================================================================
+
+  describe("idempotent setup (stale webhook)", () => {
+    it("updates stale webhook instead of creating duplicate", async () => {
+      mockExecSync("ok");
+      const ctx = makeCtx({ orgs: ["test-org"] });
+      extensions["funnel"] = {
+        getHostname: async () => "new-host.ts.net",
+      };
+      extensions["webhooks"] = {
+        getConfig: () => ({ basePath: "/hooks", token: "secret123" }),
+      };
+      await plugin.init!(ctx);
+      const ext = getGitHubExtension();
+
+      mockExecSync("ok"); // auth
+      // spawnSync call 1: findOrgWebhookByUrl — no exact match
+      // spawnSync call 2: findAnyOrgWebhook — finds stale hook 555
+      // spawnSync call 3: PATCH — returns 555
+      vi.mocked(spawnSync)
+        .mockReturnValueOnce({
+          stdout: "",
+          stderr: "",
+          status: 0,
+          signal: null,
+          pid: 1,
+          output: [null, "", ""],
+          error: undefined,
+        } as SpawnSyncReturns<string>)
+        .mockReturnValueOnce({
+          stdout: "555 https://old-host.ts.net/hooks/github",
+          stderr: "",
+          status: 0,
+          signal: null,
+          pid: 1,
+          output: [
+            null,
+            "555 https://old-host.ts.net/hooks/github",
+            "",
+          ],
+          error: undefined,
+        } as SpawnSyncReturns<string>)
+        .mockReturnValueOnce({
+          stdout: "555",
+          stderr: "",
+          status: 0,
+          signal: null,
+          pid: 1,
+          output: [null, "555", ""],
+          error: undefined,
+        } as SpawnSyncReturns<string>);
+
+      const result = await ext.setupWebhook("test-org");
+      expect(result.success).toBe(true);
+      expect(result.webhookId).toBe(555);
+      expect(result.webhookUrl).toBe(
+        "https://new-host.ts.net/hooks/github",
+      );
+    });
+  });
+
+  // ========================================================================
+  // Event subscriptions — webhooks:ready and funnel:hostname-changed
+  // ========================================================================
+
+  describe("event subscriptions", () => {
+    it("auto-sets up org webhooks on webhooks:ready event", async () => {
+      mockExecSync("ok");
+
+      const listeners: Record<string, ((...args: any[]) => void)[]> = {};
+      const ctx = makeCtx({ orgs: ["auto-org"] });
+      (ctx as any).events = {
+        on(event: string, listener: (...args: any[]) => void) {
+          if (!listeners[event]) listeners[event] = [];
+          listeners[event].push(listener);
+        },
+        off() {},
+      };
+
+      extensions["funnel"] = {
+        getHostname: async () => "my-host.ts.net",
+      };
+      extensions["webhooks"] = {
+        getConfig: () => ({ basePath: "/hooks", token: "secret123" }),
+      };
+
+      await plugin.init!(ctx);
+
+      // Verify webhooks:ready listener was registered
+      expect(listeners["webhooks:ready"]).toBeDefined();
+      expect(listeners["webhooks:ready"].length).toBe(1);
+
+      // Simulate webhooks:ready event
+      // setupOrgWebhook will call: auth (execSync), findOrgWebhookByUrl (spawnSync)
+      mockExecSync("ok");
+      mockSpawnSync("12345"); // findOrgWebhookByUrl returns existing
+
+      await listeners["webhooks:ready"][0]();
+
+      expect(ctx.log.info).toHaveBeenCalledWith(
+        expect.stringContaining("webhooks:ready received"),
+      );
+      expect(ctx.log.info).toHaveBeenCalledWith(
+        expect.stringContaining("Auto-setup webhook for auto-org"),
+      );
+    });
+
+    it("updates webhooks on funnel:hostname-changed event", async () => {
+      mockExecSync("ok");
+
+      const listeners: Record<string, ((...args: any[]) => void)[]> = {};
+      const ctx = makeCtx({ orgs: ["change-org"] });
+      (ctx as any).events = {
+        on(event: string, listener: (...args: any[]) => void) {
+          if (!listeners[event]) listeners[event] = [];
+          listeners[event].push(listener);
+        },
+        off() {},
+      };
+
+      extensions["funnel"] = {
+        getHostname: async () => "new-host.ts.net",
+      };
+      extensions["webhooks"] = {
+        getConfig: () => ({ basePath: "/hooks", token: "secret123" }),
+      };
+
+      await plugin.init!(ctx);
+
+      expect(listeners["funnel:hostname-changed"]).toBeDefined();
+
+      // Simulate hostname change
+      // updateOrgWebhook calls: findOrgWebhookByUrl (spawnSync), PATCH (spawnSync)
+      vi.mocked(spawnSync)
+        .mockReturnValueOnce({
+          stdout: "777",
+          stderr: "",
+          status: 0,
+          signal: null,
+          pid: 1,
+          output: [null, "777", ""],
+          error: undefined,
+        } as SpawnSyncReturns<string>)
+        .mockReturnValueOnce({
+          stdout: "777",
+          stderr: "",
+          status: 0,
+          signal: null,
+          pid: 1,
+          output: [null, "777", ""],
+          error: undefined,
+        } as SpawnSyncReturns<string>);
+
+      await listeners["funnel:hostname-changed"][0]({
+        oldHostname: "old-host.ts.net",
+        newHostname: "new-host.ts.net",
+      });
+
+      expect(ctx.log.info).toHaveBeenCalledWith(
+        expect.stringContaining("funnel:hostname-changed received"),
+      );
+      expect(ctx.log.info).toHaveBeenCalledWith(
+        expect.stringContaining("Updated org webhook for change-org"),
+      );
+    });
+
+    it("does not subscribe to events when ctx.events is undefined", async () => {
+      mockExecSync("ok");
+      const ctx = makeCtx({ orgs: ["no-events-org"] });
+      // ctx.events is undefined by default in makeCtx
+
+      await plugin.init!(ctx);
+
+      // Should init without error and not try to register listeners
+      expect(ctx.log.info).toHaveBeenCalledWith(
+        expect.stringContaining("GitHub plugin initialized"),
+      );
+    });
+
+    it("unsubscribes from events on shutdown", async () => {
+      mockExecSync("ok");
+
+      const offCalls: string[] = [];
+      const ctx = makeCtx({ orgs: ["shutdown-org"] });
+      (ctx as any).events = {
+        on() {},
+        off(event: string) {
+          offCalls.push(event);
+        },
+      };
+
+      await plugin.init!(ctx);
+      await plugin.shutdown!();
+
+      expect(offCalls).toContain("webhooks:ready");
+      expect(offCalls).toContain("funnel:hostname-changed");
+    });
+  });
+
+  // ========================================================================
+  // Enhanced status command
+  // ========================================================================
+
+  describe("enhanced status command", () => {
+    const handler = plugin.commands![0].handler;
+
+    it("shows per-org webhook status with URL match", async () => {
+      mockExecSync("ok");
+      const ctx = makeCtx({ orgs: ["status-org"] });
+      extensions["funnel"] = {
+        getHostname: async () => "my-host.ts.net",
+      };
+      extensions["webhooks"] = {
+        getConfig: () => ({ basePath: "/hooks", token: "secret123" }),
+      };
+
+      await plugin.init!(ctx);
+
+      // auth check succeeds
+      mockExecSync("ok");
+      // findOrgWebhookByUrl finds exact match
+      mockSpawnSync("12345");
+
+      await handler(ctx, ["status"]);
+
+      expect(ctx.log.info).toHaveBeenCalledWith(
+        expect.stringContaining("status-org: webhook 12345 (URL matches)"),
+      );
+    });
+
+    it("shows URL MISMATCH for stale webhook", async () => {
+      mockExecSync("ok");
+      const ctx = makeCtx({ orgs: ["stale-org"] });
+      extensions["funnel"] = {
+        getHostname: async () => "new-host.ts.net",
+      };
+      extensions["webhooks"] = {
+        getConfig: () => ({ basePath: "/hooks", token: "secret123" }),
+      };
+
+      await plugin.init!(ctx);
+
+      mockExecSync("ok"); // auth
+      // findOrgWebhookByUrl — no exact match
+      // findAnyOrgWebhook — finds stale
+      vi.mocked(spawnSync)
+        .mockReturnValueOnce({
+          stdout: "",
+          stderr: "",
+          status: 0,
+          signal: null,
+          pid: 1,
+          output: [null, "", ""],
+          error: undefined,
+        } as SpawnSyncReturns<string>)
+        .mockReturnValueOnce({
+          stdout: "444 https://old-host.ts.net/hooks/github",
+          stderr: "",
+          status: 0,
+          signal: null,
+          pid: 1,
+          output: [
+            null,
+            "444 https://old-host.ts.net/hooks/github",
+            "",
+          ],
+          error: undefined,
+        } as SpawnSyncReturns<string>);
+
+      await handler(ctx, ["status"]);
+
+      expect(ctx.log.info).toHaveBeenCalledWith(
+        expect.stringContaining("stale-org: webhook 444 (URL MISMATCH"),
+      );
+    });
+
+    it("shows no webhook configured when none found", async () => {
+      mockExecSync("ok");
+      const ctx = makeCtx({ orgs: ["no-hook-org"] });
+      extensions["funnel"] = {
+        getHostname: async () => "my-host.ts.net",
+      };
+      extensions["webhooks"] = {
+        getConfig: () => ({ basePath: "/hooks", token: "secret123" }),
+      };
+
+      await plugin.init!(ctx);
+
+      mockExecSync("ok"); // auth
+      // findOrgWebhookByUrl — no exact match
+      // findAnyOrgWebhook — no stale match
+      vi.mocked(spawnSync)
+        .mockReturnValueOnce({
+          stdout: "",
+          stderr: "",
+          status: 0,
+          signal: null,
+          pid: 1,
+          output: [null, "", ""],
+          error: undefined,
+        } as SpawnSyncReturns<string>)
+        .mockReturnValueOnce({
+          stdout: "",
+          stderr: "",
+          status: 0,
+          signal: null,
+          pid: 1,
+          output: [null, "", ""],
+          error: undefined,
+        } as SpawnSyncReturns<string>);
+
+      await handler(ctx, ["status"]);
+
+      expect(ctx.log.info).toHaveBeenCalledWith(
+        expect.stringContaining("no-hook-org: no webhook configured"),
       );
     });
   });
