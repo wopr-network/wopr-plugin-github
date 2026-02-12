@@ -29,6 +29,6 @@
   "type": "module",
   "version": "1.0.0",
   "dependencies": {
-    "@wopr-network/plugin-types": "github:wopr-network/wopr-plugin-types"
+    "@wopr-network/plugin-types": "^0.1.0"
   }
 }

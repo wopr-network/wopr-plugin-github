@@ -7,6 +7,8 @@
 
 import type { ConfigSchema, WOPRPlugin } from "@wopr-network/plugin-types";
 
+export type { WOPRPluginContext } from "@wopr-network/plugin-types";
+
 /**
  * Maps GitHub event types to WOPR session names.
  * Use "*" as a catch-all fallback for unmatched events.
