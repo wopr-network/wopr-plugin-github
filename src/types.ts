@@ -90,6 +90,37 @@ export interface GitHubItemSummary {
 	baseRef?: string;
 }
 
+// ============================================================================
+// Structured return types for WebMCP-facing extension methods
+// ============================================================================
+
+export interface GitHubStatusInfo {
+	authenticated: boolean;
+	username: string;
+	orgs: string[];
+	webhookUrl: string | null;
+	subscriptionCount: number;
+}
+
+export interface WatchedRepoInfo {
+	repo: string;
+	webhookId: number;
+	events: string[];
+	session: string | null;
+	createdAt: string;
+}
+
+export interface RecentActivityItem {
+	type: "pr" | "issue";
+	repo: string;
+	number: number;
+	title: string;
+	state: string;
+	author: string;
+	url: string;
+	updatedAt: string;
+}
+
 export interface GitHubExtension {
 	/** Set up GitHub webhook for an org */
 	setupWebhook(org: string): Promise<WebhookSetupResult>;
@@ -130,6 +161,11 @@ export interface GitHubExtension {
 
 	/** List all repo-level subscriptions */
 	listSubscriptions(): RepoSubscription[];
+
+	// Read-only WebMCP data methods
+	getStatus: () => Promise<GitHubStatusInfo>;
+	listWatchedRepos: () => WatchedRepoInfo[];
+	getRecentActivity: (repo?: string, limit?: number) => RecentActivityItem[];
 }
 
 /**

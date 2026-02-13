@@ -18,7 +18,10 @@ import type {
 	GitHubConfig,
 	GitHubExtension,
 	GitHubItemSummary,
+	GitHubStatusInfo,
+	RecentActivityItem,
 	RepoSubscription,
+	WatchedRepoInfo,
 	WebhookEvent,
 	WebhookRouteResult,
 	WebhookSetupResult,
@@ -990,6 +993,137 @@ const githubExtension: GitHubExtension = {
 	listSubscriptions(): RepoSubscription[] {
 		return Array.from(subscriptions.values());
 	},
+
+	async getStatus(): Promise<GitHubStatusInfo> {
+		const authenticated = await checkGhAuth();
+		let username = "unknown";
+		if (authenticated) {
+			const result = exec("gh api user --jq .login");
+			if (result.success && result.stdout) {
+				username = result.stdout;
+			}
+		}
+		const config = ctx?.getConfig<GitHubConfig>();
+		const webhookUrl = await getWebhookUrl();
+		return {
+			authenticated,
+			username,
+			orgs: config?.orgs ?? [],
+			webhookUrl,
+			subscriptionCount: subscriptions.size,
+		};
+	},
+
+	listWatchedRepos(): WatchedRepoInfo[] {
+		return Array.from(subscriptions.values()).map((sub) => ({
+			repo: sub.repo,
+			webhookId: sub.webhookId,
+			events: sub.events,
+			session: sub.session ?? null,
+			createdAt: sub.createdAt,
+		}));
+	},
+
+	getRecentActivity(repo?: string, limit = 10): RecentActivityItem[] {
+		const items: RecentActivityItem[] = [];
+		const repos = repo ? [repo] : Array.from(subscriptions.keys());
+
+		if (repos.length === 0) return items;
+
+		for (const r of repos) {
+			if (!isValidRepo(r)) continue;
+
+			// Fetch recent PRs
+			const prResult = execGh([
+				"pr",
+				"list",
+				"--repo",
+				r,
+				"--limit",
+				String(Math.min(limit, 20)),
+				"--state",
+				"all",
+				"--json",
+				"number,title,state,author,url,updatedAt",
+			]);
+			if (prResult.success && prResult.stdout) {
+				try {
+					const prs = JSON.parse(prResult.stdout) as Array<{
+						number: number;
+						title: string;
+						state: string;
+						author: { login: string };
+						url: string;
+						updatedAt: string;
+					}>;
+					for (const pr of prs) {
+						items.push({
+							type: "pr",
+							repo: r,
+							number: pr.number,
+							title: pr.title,
+							state: pr.state,
+							author: pr.author?.login || "unknown",
+							url: pr.url,
+							updatedAt: pr.updatedAt,
+						});
+					}
+				} catch {
+					// ignore parse errors
+				}
+			}
+
+			// Fetch recent issues
+			const issueResult = execGh([
+				"issue",
+				"list",
+				"--repo",
+				r,
+				"--limit",
+				String(Math.min(limit, 20)),
+				"--state",
+				"all",
+				"--json",
+				"number,title,state,author,url,updatedAt",
+			]);
+			if (issueResult.success && issueResult.stdout) {
+				try {
+					const issues = JSON.parse(issueResult.stdout) as Array<{
+						number: number;
+						title: string;
+						state: string;
+						author: { login: string };
+						url: string;
+						updatedAt: string;
+					}>;
+					for (const issue of issues) {
+						items.push({
+							type: "issue",
+							repo: r,
+							number: issue.number,
+							title: issue.title,
+							state: issue.state,
+							author: issue.author?.login || "unknown",
+							url: issue.url,
+							updatedAt: issue.updatedAt,
+						});
+					}
+				} catch {
+					// ignore parse errors
+				}
+			}
+
+			// Stop if we have enough items
+			if (items.length >= limit) break;
+		}
+
+		// Sort by updatedAt descending and limit
+		items.sort(
+			(a, b) =>
+				new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
+		);
+		return items.slice(0, limit);
+	},
 };
 
 // ============================================================================
@@ -1445,7 +1579,10 @@ export default plugin;
 export type {
 	GitHubExtension,
 	GitHubItemSummary,
+	GitHubStatusInfo,
+	RecentActivityItem,
 	RepoSubscription,
+	WatchedRepoInfo,
 	WebhookEvent,
 	WebhookRouteResult,
 };
