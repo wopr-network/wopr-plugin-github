@@ -10,11 +10,10 @@ import type {
 
 // Mock child_process before importing the plugin
 vi.mock("node:child_process", () => ({
-	execSync: vi.fn(),
 	spawnSync: vi.fn(),
 }));
 
-import { execSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import type { SpawnSyncReturns } from "node:child_process";
 
 // Path to the subscriptions file that the plugin persists
@@ -29,7 +28,7 @@ const { default: plugin } = await import("../src/index.js");
 // ---------------------------------------------------------------------------
 
 function mockExecSync(returnValue: string) {
-	vi.mocked(execSync).mockReturnValue(returnValue);
+	mockSpawnSync(returnValue, 0);
 }
 
 function mockSpawnSync(stdout: string, status = 0) {
@@ -113,9 +112,7 @@ describe("GitHubExtension WebMCP methods", () => {
 	describe("getStatus", () => {
 		it("should return unauthenticated status when gh CLI is not authenticated", async () => {
 			const ctx = makeCtx({ orgs: ["wopr-network"] });
-			vi.mocked(execSync).mockImplementation(() => {
-				throw new Error("not authenticated");
-			});
+			mockSpawnSyncError("not authenticated");
 			await plugin.init!(ctx);
 
 			const ext = getGitHubExtension();
@@ -135,12 +132,43 @@ describe("GitHubExtension WebMCP methods", () => {
 
 			const ext = getGitHubExtension();
 			// Mock the gh auth status check and gh api user call
-			vi.mocked(execSync).mockImplementation((cmd: string | URL) => {
-				const cmdStr = String(cmd);
-				if (cmdStr.includes("auth status")) return "Logged in";
-				if (cmdStr.includes("api user")) return "wopr-bot";
-				return "";
-			});
+			// Both now go through spawnSync via execGh()
+			vi.mocked(spawnSync).mockImplementation(
+				(cmd: string, args?: readonly string[]) => {
+					const argsArr = args as string[] | undefined;
+					if (argsArr?.includes("auth")) {
+						return {
+							stdout: "Logged in",
+							stderr: "",
+							status: 0,
+							signal: null,
+							pid: 1234,
+							output: [null, "Logged in", ""],
+							error: undefined,
+						} as SpawnSyncReturns<string>;
+					}
+					if (argsArr?.includes("api")) {
+						return {
+							stdout: "wopr-bot",
+							stderr: "",
+							status: 0,
+							signal: null,
+							pid: 1234,
+							output: [null, "wopr-bot", ""],
+							error: undefined,
+						} as SpawnSyncReturns<string>;
+					}
+					return {
+						stdout: "",
+						stderr: "",
+						status: 0,
+						signal: null,
+						pid: 1234,
+						output: [null, "", ""],
+						error: undefined,
+					} as SpawnSyncReturns<string>;
+				},
+			);
 
 			const status = await ext.getStatus();
 
@@ -155,9 +183,7 @@ describe("GitHubExtension WebMCP methods", () => {
 			await plugin.init!(ctx);
 
 			const ext = getGitHubExtension();
-			vi.mocked(execSync).mockImplementation(() => {
-				throw new Error("not authenticated");
-			});
+			mockSpawnSyncError("not authenticated");
 
 			const status = await ext.getStatus();
 			expect(status.subscriptionCount).toBe(0);
@@ -169,9 +195,7 @@ describe("GitHubExtension WebMCP methods", () => {
 			await plugin.init!(ctx);
 
 			const ext = getGitHubExtension();
-			vi.mocked(execSync).mockImplementation(() => {
-				throw new Error("not authenticated");
-			});
+			mockSpawnSyncError("not authenticated");
 
 			const status = await ext.getStatus();
 			expect(status.orgs).toEqual([]);

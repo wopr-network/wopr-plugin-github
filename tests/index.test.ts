@@ -9,7 +9,6 @@ import type { PluginStorageAPI } from "../src/storage.js";
 
 // Mock child_process before importing the plugin
 vi.mock("node:child_process", () => ({
-  execSync: vi.fn(),
   spawnSync: vi.fn(),
 }));
 
@@ -22,7 +21,7 @@ vi.mock("node:fs", () => ({
   unlinkSync: vi.fn(),
 }));
 
-import { execSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { readFileSync, existsSync, unlinkSync } from "node:fs";
 import type { SpawnSyncReturns } from "node:child_process";
 
@@ -33,16 +32,16 @@ const { default: plugin } = await import("../src/index.js");
 // Helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Legacy helper — sets spawnSync to return success with given stdout.
+ * Previously this mocked execSync; now all code paths use spawnSync.
+ */
 function mockExecSync(returnValue: string) {
-  vi.mocked(execSync).mockReturnValue(returnValue);
+  mockSpawnSync(returnValue, 0);
 }
 
 function mockExecSyncError(message: string) {
-  vi.mocked(execSync).mockImplementation(() => {
-    const err: any = new Error(message);
-    err.stderr = message;
-    throw err;
-  });
+  mockSpawnSyncError(message);
 }
 
 function mockSpawnSync(stdout: string, status = 0) {
@@ -209,12 +208,26 @@ describe("wopr-plugin-github", () => {
     });
 
     it("warns when gh CLI is not authenticated", async () => {
-      // "which gh" succeeds, "gh auth status" fails
-      vi.mocked(execSync)
-        .mockReturnValueOnce("/usr/bin/gh" as any) // which gh
-        .mockImplementationOnce(() => {
-          throw new Error("not logged in");
-        }); // gh auth status
+      // "which gh" succeeds, then "gh auth status" fails
+      vi.mocked(spawnSync)
+        .mockReturnValueOnce({
+          stdout: "/usr/bin/gh",
+          stderr: "",
+          status: 0,
+          signal: null,
+          pid: 1234,
+          output: [null, "/usr/bin/gh", ""],
+          error: undefined,
+        } as SpawnSyncReturns<string>) // which gh
+        .mockReturnValueOnce({
+          stdout: "",
+          stderr: "not logged in",
+          status: 1,
+          signal: null,
+          pid: 1234,
+          output: [null, "", "not logged in"],
+          error: undefined,
+        } as SpawnSyncReturns<string>); // gh auth status
 
       const ctx = makeCtx();
       await plugin.init!(ctx);
@@ -796,12 +809,20 @@ describe("wopr-plugin-github", () => {
       await plugin.init!(ctx);
       const ext = getGitHubExtension();
 
-      // auth check succeeds
-      mockExecSync("ok");
-      // spawnSync call 1: findOrgWebhookByUrl — no exact match
-      // spawnSync call 2: findAnyOrgWebhook — no stale webhook
-      // spawnSync call 3: create hook returns new ID
+      // spawnSync call 1: checkGhAuth (auth check succeeds)
+      // spawnSync call 2: findOrgWebhookByUrl — no exact match
+      // spawnSync call 3: findAnyOrgWebhook — no stale webhook
+      // spawnSync call 4: create hook returns new ID
       vi.mocked(spawnSync)
+        .mockReturnValueOnce({
+          stdout: "Logged in",
+          stderr: "",
+          status: 0,
+          signal: null,
+          pid: 1,
+          output: [null, "Logged in", ""],
+          error: undefined,
+        } as SpawnSyncReturns<string>)
         .mockReturnValueOnce({
           stdout: "",
           stderr: "",
@@ -850,11 +871,20 @@ describe("wopr-plugin-github", () => {
       await plugin.init!(ctx);
       const ext = getGitHubExtension();
 
-      mockExecSync("ok"); // auth
-      // spawnSync call 1: findOrgWebhookByUrl — no exact match
-      // spawnSync call 2: findAnyOrgWebhook — no stale webhook
-      // spawnSync call 3: create — fails
+      // spawnSync call 1: checkGhAuth (auth succeeds)
+      // spawnSync call 2: findOrgWebhookByUrl — no exact match
+      // spawnSync call 3: findAnyOrgWebhook — no stale webhook
+      // spawnSync call 4: create — fails
       vi.mocked(spawnSync)
+        .mockReturnValueOnce({
+          stdout: "Logged in",
+          stderr: "",
+          status: 0,
+          signal: null,
+          pid: 1,
+          output: [null, "Logged in", ""],
+          error: undefined,
+        } as SpawnSyncReturns<string>)
         .mockReturnValueOnce({
           stdout: "",
           stderr: "",
@@ -921,11 +951,15 @@ describe("wopr-plugin-github", () => {
       expect(result.error).toContain("Invalid org name");
     });
 
-    it("rejects org with dots", async () => {
+    it("accepts org with dots", async () => {
       const ext = await initWithExtensions();
+      // Dots are valid in GitHub org/user names
+      // setupWebhook will proceed past validation (may fail for other reasons in test)
       const result = await ext.setupWebhook("org.name");
-      expect(result.success).toBe(false);
-      expect(result.error).toContain("Invalid org name");
+      // Should NOT fail with "Invalid org name"
+      if (!result.success) {
+        expect(result.error).not.toContain("Invalid org name");
+      }
     });
 
     it("rejects org with spaces", async () => {
@@ -1370,12 +1404,20 @@ describe("wopr-plugin-github", () => {
     it("finds and patches an existing webhook by old URL", async () => {
       const ext = await initWithExtensions();
 
-      // auth check succeeds
-      mockExecSync("ok");
-      // spawnSync call 1: findOrgWebhookByUrl(newUrl) — no match (not already updated)
-      // spawnSync call 2: findOrgWebhookByUrl(oldUrl) — finds hook 999
-      // spawnSync call 3: PATCH — returns 999
+      // spawnSync call 1: checkGhAuth (auth check succeeds)
+      // spawnSync call 2: findOrgWebhookByUrl(newUrl) — no match (not already updated)
+      // spawnSync call 3: findOrgWebhookByUrl(oldUrl) — finds hook 999
+      // spawnSync call 4: PATCH — returns 999
       vi.mocked(spawnSync)
+        .mockReturnValueOnce({
+          stdout: "Logged in",
+          stderr: "",
+          status: 0,
+          signal: null,
+          pid: 1,
+          output: [null, "Logged in", ""],
+          error: undefined,
+        } as SpawnSyncReturns<string>)
         .mockReturnValueOnce({
           stdout: "",
           stderr: "",
@@ -1419,11 +1461,19 @@ describe("wopr-plugin-github", () => {
     it("returns error when no existing webhook found", async () => {
       const ext = await initWithExtensions();
 
-      // auth check succeeds
-      mockExecSync("ok");
-      // spawnSync call 1: findOrgWebhookByUrl(newUrl) — no match
-      // spawnSync call 2: findOrgWebhookByUrl(oldUrl) — no match
+      // spawnSync call 1: checkGhAuth (auth succeeds)
+      // spawnSync call 2: findOrgWebhookByUrl(newUrl) — no match
+      // spawnSync call 3: findOrgWebhookByUrl(oldUrl) — no match
       vi.mocked(spawnSync)
+        .mockReturnValueOnce({
+          stdout: "Logged in",
+          stderr: "",
+          status: 0,
+          signal: null,
+          pid: 1,
+          output: [null, "Logged in", ""],
+          error: undefined,
+        } as SpawnSyncReturns<string>)
         .mockReturnValueOnce({
           stdout: "",
           stderr: "",
@@ -1455,12 +1505,20 @@ describe("wopr-plugin-github", () => {
     it("returns error when PATCH fails", async () => {
       const ext = await initWithExtensions();
 
-      // auth check succeeds
-      mockExecSync("ok");
-      // spawnSync call 1: findOrgWebhookByUrl(newUrl) — no match
-      // spawnSync call 2: findOrgWebhookByUrl(oldUrl) — finds hook 999
-      // spawnSync call 3: PATCH — fails
+      // spawnSync call 1: checkGhAuth (auth succeeds)
+      // spawnSync call 2: findOrgWebhookByUrl(newUrl) — no match
+      // spawnSync call 3: findOrgWebhookByUrl(oldUrl) — finds hook 999
+      // spawnSync call 4: PATCH — fails
       vi.mocked(spawnSync)
+        .mockReturnValueOnce({
+          stdout: "Logged in",
+          stderr: "",
+          status: 0,
+          signal: null,
+          pid: 1,
+          output: [null, "Logged in", ""],
+          error: undefined,
+        } as SpawnSyncReturns<string>)
         .mockReturnValueOnce({
           stdout: "",
           stderr: "",
@@ -1535,11 +1593,20 @@ describe("wopr-plugin-github", () => {
       await plugin.init!(ctx);
       const ext = getGitHubExtension();
 
-      mockExecSync("ok"); // auth
-      // spawnSync call 1: findOrgWebhookByUrl — no exact match
-      // spawnSync call 2: findAnyOrgWebhook — finds stale hook 555 (alternating id/url lines)
-      // spawnSync call 3: PATCH — returns 555
+      // spawnSync call 1: checkGhAuth (auth succeeds)
+      // spawnSync call 2: findOrgWebhookByUrl — no exact match
+      // spawnSync call 3: findAnyOrgWebhook — finds stale hook 555 (alternating id/url lines)
+      // spawnSync call 4: PATCH — returns 555
       vi.mocked(spawnSync)
+        .mockReturnValueOnce({
+          stdout: "Logged in",
+          stderr: "",
+          status: 0,
+          signal: null,
+          pid: 1,
+          output: [null, "Logged in", ""],
+          error: undefined,
+        } as SpawnSyncReturns<string>)
         .mockReturnValueOnce({
           stdout: "",
           stderr: "",
@@ -1653,10 +1720,18 @@ describe("wopr-plugin-github", () => {
       expect(listeners["funnel:hostname-changed"]).toBeDefined();
 
       // Simulate hostname change
-      // updateOrgWebhook calls: checkGhAuth (execSync), findOrgWebhookByUrl(newUrl),
-      //   findOrgWebhookByUrl(oldUrl), PATCH (spawnSync)
-      mockExecSync("ok"); // auth check
+      // updateOrgWebhook calls: checkGhAuth, findOrgWebhookByUrl(newUrl),
+      //   findOrgWebhookByUrl(oldUrl), PATCH — all via spawnSync
       vi.mocked(spawnSync)
+        .mockReturnValueOnce({
+          stdout: "Logged in",
+          stderr: "",
+          status: 0,
+          signal: null,
+          pid: 1,
+          output: [null, "Logged in", ""],
+          error: undefined,
+        } as SpawnSyncReturns<string>)
         .mockReturnValueOnce({
           stdout: "",
           stderr: "",
@@ -1774,10 +1849,19 @@ describe("wopr-plugin-github", () => {
 
       await plugin.init!(ctx);
 
-      mockExecSync("ok"); // auth
-      // findOrgWebhookByUrl — no exact match (alternating id/url format, empty = no match)
-      // findAnyOrgWebhook — finds stale (alternating id/url format)
+      // spawnSync call 1: checkGhAuth (auth succeeds)
+      // spawnSync call 2: findOrgWebhookByUrl — no exact match
+      // spawnSync call 3: findAnyOrgWebhook — finds stale (alternating id/url format)
       vi.mocked(spawnSync)
+        .mockReturnValueOnce({
+          stdout: "Logged in",
+          stderr: "",
+          status: 0,
+          signal: null,
+          pid: 1,
+          output: [null, "Logged in", ""],
+          error: undefined,
+        } as SpawnSyncReturns<string>)
         .mockReturnValueOnce({
           stdout: "",
           stderr: "",
@@ -1886,9 +1970,19 @@ describe("wopr-plugin-github", () => {
 
       await plugin.init!(ctx);
 
-      // auth check succeeds, then repo webhook check (no existing), create returns ID
-      mockExecSync("ok");
+      // spawnSync call 1: checkGhAuth (auth succeeds)
+      // spawnSync call 2: repo webhook check (no existing)
+      // spawnSync call 3: create returns ID
       vi.mocked(spawnSync)
+        .mockReturnValueOnce({
+          stdout: "Logged in",
+          stderr: "",
+          status: 0,
+          signal: null,
+          pid: 1,
+          output: [null, "Logged in", ""],
+          error: undefined,
+        } as SpawnSyncReturns<string>)
         .mockReturnValueOnce({
           stdout: "",
           stderr: "",

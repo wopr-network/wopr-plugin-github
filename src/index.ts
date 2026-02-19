@@ -7,7 +7,7 @@
  * - Uses webhooks extension for routing config
  */
 
-import { execSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -60,15 +60,6 @@ const SUBSCRIPTIONS_PATH = join(__dirname, "..", "data", "subscriptions.json");
 // Helpers
 // ============================================================================
 
-function exec(cmd: string): { stdout: string; success: boolean } {
-	try {
-		const stdout = execSync(cmd, { encoding: "utf-8", timeout: 30000 }).trim();
-		return { stdout, success: true };
-	} catch (err: any) {
-		return { stdout: err.stderr || err.message || "", success: false };
-	}
-}
-
 /**
  * Execute gh CLI with array of arguments (avoids shell escaping issues)
  */
@@ -91,7 +82,7 @@ function execGh(args: string[]): { stdout: string; success: boolean } {
 }
 
 async function checkGhAuth(): Promise<boolean> {
-	const result = exec("gh auth status");
+	const result = execGh(["auth", "status"]);
 	return result.success;
 }
 
@@ -131,10 +122,10 @@ async function getWebhookUrl(): Promise<string | null> {
 }
 
 async function setupOrgWebhook(org: string): Promise<WebhookSetupResult> {
-	if (!isValidOrg(org)) {
+	if (!validateOrg(org)) {
 		return {
 			success: false,
-			error: `Invalid org name: "${org}". Only alphanumeric characters and hyphens are allowed.`,
+			error: `Invalid org name: "${org}". Only alphanumeric characters, hyphens, dots, and underscores are allowed.`,
 		};
 	}
 
@@ -251,7 +242,7 @@ async function setupOrgWebhook(org: string): Promise<WebhookSetupResult> {
  * Find an org webhook by its config URL. Returns the hook ID or null.
  */
 function findOrgWebhookByUrl(org: string, url: string): number | null {
-	if (!isValidOrg(org)) return null;
+	if (!validateOrg(org)) return null;
 	const listArgs = [
 		"api",
 		`orgs/${org}/hooks`,
@@ -277,7 +268,7 @@ function findAnyOrgWebhook(
 	org: string,
 	basePath: string,
 ): { id: number; url: string } | null {
-	if (!isValidOrg(org)) return null;
+	if (!validateOrg(org)) return null;
 	const suffix = `${basePath}/github`;
 	const listArgs = [
 		"api",
@@ -307,10 +298,10 @@ async function updateOrgWebhook(
 	oldHostname: string,
 	newHostname: string,
 ): Promise<WebhookSetupResult> {
-	if (!isValidOrg(org)) {
+	if (!validateOrg(org)) {
 		return {
 			success: false,
-			error: `Invalid org name: "${org}". Only alphanumeric characters and hyphens are allowed.`,
+			error: `Invalid org name: "${org}". Only alphanumeric characters, hyphens, dots, and underscores are allowed.`,
 		};
 	}
 
@@ -585,11 +576,14 @@ async function loadSubscriptions(): Promise<void> {
 }
 
 /**
- * Validate GitHub org name: alphanumeric and hyphens only.
+ * Validate GitHub org name: alphanumeric, hyphens, dots, underscores. Max 39 chars.
+ * Must start/end with alphanumeric. No path traversal characters.
  * Prevents path traversal in API paths like `orgs/${org}/hooks`.
  */
-function isValidOrg(org: string): boolean {
-	return /^[a-zA-Z0-9-]+$/.test(org);
+const GITHUB_ORG_REGEX = /^[a-zA-Z0-9](?:[a-zA-Z0-9._-]{0,37}[a-zA-Z0-9])?$/;
+
+function validateOrg(org: string): boolean {
+	return GITHUB_ORG_REGEX.test(org);
 }
 
 /**
@@ -1062,7 +1056,7 @@ const githubExtension: GitHubExtension = {
 		const authenticated = await checkGhAuth();
 		let username = "unknown";
 		if (authenticated) {
-			const result = exec("gh api user --jq .login");
+			const result = execGh(["api", "user", "--jq", ".login"]);
 			if (result.success && result.stdout) {
 				username = result.stdout;
 			}
@@ -1303,9 +1297,9 @@ const plugin: WOPRPluginWithConfig = {
 					}
 
 					for (const org of orgs) {
-						if (!isValidOrg(org)) {
+						if (!validateOrg(org)) {
 							cmdCtx.log.error(
-								`Invalid org name: "${org}". Only alphanumeric characters and hyphens are allowed.`,
+								`Invalid org name: "${org}". Only alphanumeric characters, hyphens, dots, and underscores are allowed.`,
 							);
 							continue;
 						}
@@ -1513,7 +1507,9 @@ const plugin: WOPRPluginWithConfig = {
 		await loadSubscriptions();
 
 		// Check gh CLI availability
-		const ghAvailable = exec("which gh").success;
+		const ghAvailable =
+			spawnSync("which", ["gh"], { encoding: "utf-8", timeout: 5000 })
+				.status === 0;
 		if (!ghAvailable) {
 			ctx.log.warn(
 				"GitHub CLI (gh) not found. Install: brew install gh (macOS) or apt install gh (Debian)",
@@ -1653,6 +1649,7 @@ const plugin: WOPRPluginWithConfig = {
 };
 
 export default plugin;
+export { validateOrg, setupOrgWebhook };
 export type {
 	GitHubExtension,
 	GitHubItemSummary,
