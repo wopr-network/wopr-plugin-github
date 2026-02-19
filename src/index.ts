@@ -125,7 +125,7 @@ async function setupOrgWebhook(org: string): Promise<WebhookSetupResult> {
 	if (!validateOrg(org)) {
 		return {
 			success: false,
-			error: `Invalid org name: "${org}". Only alphanumeric characters and hyphens are allowed.`,
+			error: `Invalid org name: "${org}". Only alphanumeric characters, hyphens, dots, and underscores are allowed.`,
 		};
 	}
 
@@ -301,7 +301,7 @@ async function updateOrgWebhook(
 	if (!validateOrg(org)) {
 		return {
 			success: false,
-			error: `Invalid org name: "${org}". Only alphanumeric characters and hyphens are allowed.`,
+			error: `Invalid org name: "${org}". Only alphanumeric characters, hyphens, dots, and underscores are allowed.`,
 		};
 	}
 
@@ -1299,7 +1299,7 @@ const plugin: WOPRPluginWithConfig = {
 					for (const org of orgs) {
 						if (!validateOrg(org)) {
 							cmdCtx.log.error(
-								`Invalid org name: "${org}". Only alphanumeric characters and hyphens are allowed.`,
+								`Invalid org name: "${org}". Only alphanumeric characters, hyphens, dots, and underscores are allowed.`,
 							);
 							continue;
 						}
