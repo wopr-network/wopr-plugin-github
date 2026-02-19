@@ -8,10 +8,12 @@
  */
 
 import { execSync, spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { WOPRPluginContext } from "@wopr-network/plugin-types";
+import type { PluginContextWithStorage, PluginStorageAPI } from "./storage.js";
+import { SUBSCRIPTIONS_SCHEMA, SUBSCRIPTIONS_TABLE } from "./storage.js";
 import type {
 	CustomEventEmitter,
 	FunnelExtension,
@@ -43,8 +45,13 @@ let hostnameChangedHandler: ((...args: any[]) => void) | null = null;
 let ctx: WOPRPluginContext | null = null;
 
 /**
- * Path to the subscriptions persistence file.
- * Stored alongside the plugin source in a `data/` directory.
+ * Reference to the Storage API when available.
+ * Set during init() if ctx.storage is present on the plugin context.
+ */
+let storage: PluginStorageAPI | null = null;
+
+/**
+ * Path to the legacy subscriptions JSON file (used only for one-time migration).
  */
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SUBSCRIPTIONS_PATH = join(__dirname, "..", "data", "subscriptions.json");
@@ -443,7 +450,7 @@ async function updateRepoWebhook(
 	const sub = subscriptions.get(repo);
 	if (sub) {
 		sub.webhookId = hookId;
-		persistSubscriptions();
+		await persistSubscription(sub);
 	}
 
 	ctx?.log.info(
@@ -471,51 +478,108 @@ const DEFAULT_REPO_EVENTS = [
 const subscriptions = new Map<string, RepoSubscription>();
 
 /**
- * Persist the current subscriptions Map to disk as JSON.
+ * Persist a single subscription to the Storage API (SQL).
+ * Falls back silently if storage is unavailable.
  */
-function persistSubscriptions(): void {
+async function persistSubscription(sub: RepoSubscription): Promise<void> {
+	if (!storage) return;
 	try {
-		const obj: Record<string, RepoSubscription> = {};
-		for (const [repo, sub] of subscriptions) {
-			obj[repo] = sub;
-		}
-		mkdirSync(dirname(SUBSCRIPTIONS_PATH), { recursive: true });
-		writeFileSync(SUBSCRIPTIONS_PATH, `${JSON.stringify(obj, null, 2)}\n`);
-		ctx?.log.debug?.(`Persisted ${subscriptions.size} subscription(s) to disk`);
+		await storage.put(SUBSCRIPTIONS_TABLE, sub.repo, sub);
+		ctx?.log.debug?.(`Persisted subscription for ${sub.repo} to storage`);
 	} catch (err: any) {
-		ctx?.log.warn(`Failed to persist subscriptions: ${err.message}`);
+		ctx?.log.warn(
+			`Failed to persist subscription for ${sub.repo}: ${err.message}`,
+		);
 	}
 }
 
 /**
- * Load subscriptions from disk (subscriptions.json), falling back to config.
+ * Remove a single subscription from the Storage API (SQL).
+ * Falls back silently if storage is unavailable.
  */
-function loadSubscriptions(): void {
+async function removeSubscription(repo: string): Promise<void> {
+	if (!storage) return;
+	try {
+		await storage.delete(SUBSCRIPTIONS_TABLE, repo);
+		ctx?.log.debug?.(`Removed subscription for ${repo} from storage`);
+	} catch (err: any) {
+		ctx?.log.warn(`Failed to remove subscription for ${repo}: ${err.message}`);
+	}
+}
+
+/**
+ * Load subscriptions from the Storage API (SQL), with migration from
+ * the legacy subscriptions.json file and a fallback to config.
+ *
+ * Priority order:
+ * 1. Migrate from subscriptions.json if it exists (one-time, then deletes file)
+ * 2. Load from SQL storage
+ * 3. Fall back to config-embedded subscriptions (first-time setup)
+ */
+async function loadSubscriptions(): Promise<void> {
 	subscriptions.clear();
 
-	// Try loading from subscriptions.json first
-	try {
-		const raw = readFileSync(SUBSCRIPTIONS_PATH, "utf-8");
-		const obj = JSON.parse(raw) as Record<string, RepoSubscription>;
-		for (const [repo, sub] of Object.entries(obj)) {
-			subscriptions.set(repo, sub);
-		}
-		if (subscriptions.size > 0) {
+	// Step 1: Migrate from legacy subscriptions.json if it exists
+	if (existsSync(SUBSCRIPTIONS_PATH)) {
+		try {
+			const raw = readFileSync(SUBSCRIPTIONS_PATH, "utf-8");
+			const obj = JSON.parse(raw) as Record<string, RepoSubscription>;
+			for (const [repo, sub] of Object.entries(obj)) {
+				subscriptions.set(repo, sub);
+			}
+			ctx?.log.info(
+				`Migrating ${subscriptions.size} subscription(s) from subscriptions.json to Storage API`,
+			);
+			// Persist each migrated subscription to storage
+			for (const sub of subscriptions.values()) {
+				await persistSubscription(sub);
+			}
+			// Delete the legacy file after successful migration
+			try {
+				unlinkSync(SUBSCRIPTIONS_PATH);
+				ctx?.log.info("Deleted legacy subscriptions.json after migration");
+			} catch (err: any) {
+				ctx?.log.warn(
+					`Failed to delete legacy subscriptions.json: ${err.message}`,
+				);
+			}
 			return;
+		} catch {
+			// File unreadable or invalid JSON — fall through
 		}
-	} catch {
-		// File doesn't exist or is invalid — fall through to config
 	}
 
-	// Fall back to config-embedded subscriptions (migration path)
+	// Step 2: Load from SQL storage
+	if (storage) {
+		try {
+			const rows = await storage.list(SUBSCRIPTIONS_TABLE);
+			for (const row of rows) {
+				const sub = row as RepoSubscription;
+				if (sub?.repo) {
+					subscriptions.set(sub.repo, sub);
+				}
+			}
+			if (subscriptions.size > 0) {
+				return;
+			}
+		} catch (err: any) {
+			ctx?.log.warn(
+				`Failed to load subscriptions from storage: ${err.message}`,
+			);
+		}
+	}
+
+	// Step 3: Fall back to config-embedded subscriptions (first-time setup)
 	const config = ctx?.getConfig<GitHubConfig>();
 	if (config?.subscriptions) {
 		for (const [repo, sub] of Object.entries(config.subscriptions)) {
 			subscriptions.set(repo, sub);
 		}
-		// Migrate: persist to file so future loads use the file
+		// Persist config subscriptions to storage for future runs
 		if (subscriptions.size > 0) {
-			persistSubscriptions();
+			for (const sub of subscriptions.values()) {
+				await persistSubscription(sub);
+			}
 		}
 	}
 }
@@ -591,7 +655,7 @@ async function subscribeRepo(
 			createdAt: new Date().toISOString(),
 		};
 		subscriptions.set(repo, sub);
-		persistSubscriptions();
+		await persistSubscription(sub);
 		ctx?.log.info(`Adopted existing webhook for ${repo}: ID ${existingId}`);
 		return { success: true, webhookUrl, webhookId: existingId };
 	}
@@ -642,7 +706,7 @@ async function subscribeRepo(
 		createdAt: new Date().toISOString(),
 	};
 	subscriptions.set(repo, sub);
-	persistSubscriptions();
+	await persistSubscription(sub);
 	ctx?.log.info(`Subscribed to ${repo}: webhook ID ${webhookId}`);
 	return { success: true, webhookUrl, webhookId };
 }
@@ -684,7 +748,7 @@ async function unsubscribeRepo(
 	}
 
 	subscriptions.delete(repo);
-	persistSubscriptions();
+	await removeSubscription(repo);
 	ctx?.log.info(`Unsubscribed from ${repo} (webhook ID ${sub.webhookId})`);
 	return { success: true };
 }
@@ -1430,11 +1494,23 @@ const plugin: WOPRPluginWithConfig = {
 		ctx = pluginCtx;
 		const config = ctx.getConfig<GitHubConfig>();
 
+		// Set up Storage API if available
+		const ctxWithStorage = pluginCtx as unknown as PluginContextWithStorage;
+		if (ctxWithStorage.storage) {
+			storage = ctxWithStorage.storage;
+			storage.register(SUBSCRIPTIONS_TABLE, SUBSCRIPTIONS_SCHEMA);
+		} else {
+			storage = null;
+			ctx.log.warn(
+				"Storage API not available — subscription persistence is disabled until WOPR daemon provides storage support",
+			);
+		}
+
 		// Register extension
 		ctx.registerExtension("github", githubExtension);
 
-		// Load subscriptions from disk (or migrate from config)
-		loadSubscriptions();
+		// Load subscriptions from storage (or migrate from file/config)
+		await loadSubscriptions();
 
 		// Check gh CLI availability
 		const ghAvailable = exec("which gh").success;
@@ -1570,6 +1646,7 @@ const plugin: WOPRPluginWithConfig = {
 		}
 
 		subscriptions.clear();
+		storage = null;
 		ctx?.unregisterExtension("github");
 		ctx = null;
 	},
