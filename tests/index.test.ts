@@ -5,6 +5,7 @@ import type {
   GitHubExtension,
   WebhookEvent,
 } from "../src/types.js";
+import type { PluginStorageAPI } from "../src/storage.js";
 
 // Mock child_process before importing the plugin
 vi.mock("node:child_process", () => ({
@@ -12,7 +13,17 @@ vi.mock("node:child_process", () => ({
   spawnSync: vi.fn(),
 }));
 
+// Mock node:fs so subscriptions.json file operations are controlled in tests
+vi.mock("node:fs", () => ({
+  readFileSync: vi.fn(),
+  writeFileSync: vi.fn(),
+  mkdirSync: vi.fn(),
+  existsSync: vi.fn(),
+  unlinkSync: vi.fn(),
+}));
+
 import { execSync, spawnSync } from "node:child_process";
+import { readFileSync, existsSync, unlinkSync } from "node:fs";
 import type { SpawnSyncReturns } from "node:child_process";
 
 // Dynamic import to ensure mocks are in place
@@ -61,10 +72,39 @@ function mockSpawnSyncError(stderr: string) {
 let configStore: GitHubConfig | undefined;
 let extensions: Record<string, unknown> = {};
 
-function makeCtx(config?: GitHubConfig): WOPRPluginContext {
+/**
+ * Create an in-memory storage mock that implements PluginStorageAPI.
+ * Used to test SQL-backed storage behavior without a real DB.
+ */
+function makeStorageMock(): PluginStorageAPI & { _store: Map<string, unknown> } {
+  const store = new Map<string, unknown>();
+  return {
+    _store: store,
+    register: vi.fn(),
+    async get(table: string, key: string) {
+      return store.get(`${table}:${key}`) ?? null;
+    },
+    async put(table: string, key: string, value: unknown) {
+      store.set(`${table}:${key}`, value);
+    },
+    async list(table: string) {
+      const prefix = `${table}:`;
+      const results: unknown[] = [];
+      for (const [k, v] of store) {
+        if (k.startsWith(prefix)) results.push(v);
+      }
+      return results;
+    },
+    async delete(table: string, key: string) {
+      store.delete(`${table}:${key}`);
+    },
+  };
+}
+
+function makeCtx(config?: GitHubConfig, storage?: PluginStorageAPI): WOPRPluginContext {
   configStore = config;
   extensions = {};
-  return {
+  const ctx: any = {
     log: {
       info: vi.fn(),
       warn: vi.fn(),
@@ -87,6 +127,10 @@ function makeCtx(config?: GitHubConfig): WOPRPluginContext {
       return extensions[name];
     },
   };
+  if (storage) {
+    ctx.storage = storage;
+  }
+  return ctx as WOPRPluginContext;
 }
 
 function getGitHubExtension(): GitHubExtension {
@@ -1803,6 +1847,242 @@ describe("wopr-plugin-github", () => {
 
       expect(ctx.log.info).toHaveBeenCalledWith(
         expect.stringContaining("no-hook-org: no webhook configured"),
+      );
+    });
+  });
+
+  // ========================================================================
+  // Storage API — SQL-backed subscription persistence
+  // ========================================================================
+
+  describe("Storage API — subscription persistence", () => {
+    beforeEach(() => {
+      // Default: no subscriptions.json file present
+      vi.mocked(existsSync).mockReturnValue(false);
+    });
+
+    it("registers the subscriptions schema with storage on init", async () => {
+      mockExecSync("ok");
+      const storage = makeStorageMock();
+      const ctx = makeCtx({}, storage);
+
+      await plugin.init!(ctx);
+
+      expect(storage.register).toHaveBeenCalledWith(
+        expect.stringContaining("subscriptions"),
+        expect.any(Object),
+      );
+    });
+
+    it("persists a new subscription to storage when subscribing", async () => {
+      mockExecSync("ok");
+      const storage = makeStorageMock();
+      const ctx = makeCtx({}, storage);
+
+      extensions["funnel"] = { getHostname: async () => "host.ts.net" };
+      extensions["webhooks"] = {
+        getConfig: () => ({ basePath: "/hooks", token: "secret" }),
+      };
+
+      await plugin.init!(ctx);
+
+      // auth check succeeds, then repo webhook check (no existing), create returns ID
+      mockExecSync("ok");
+      vi.mocked(spawnSync)
+        .mockReturnValueOnce({
+          stdout: "",
+          stderr: "",
+          status: 0,
+          signal: null,
+          pid: 1,
+          output: [null, "", ""],
+          error: undefined,
+        } as SpawnSyncReturns<string>)
+        .mockReturnValueOnce({
+          stdout: "42",
+          stderr: "",
+          status: 0,
+          signal: null,
+          pid: 1,
+          output: [null, "42", ""],
+          error: undefined,
+        } as SpawnSyncReturns<string>);
+
+      const ext = getGitHubExtension();
+      const result = await ext.subscribe("owner/repo");
+
+      expect(result.success).toBe(true);
+      // Subscription should be in storage
+      const stored = await storage.get("github_subscriptions", "owner/repo");
+      expect(stored).not.toBeNull();
+      expect((stored as any).repo).toBe("owner/repo");
+      expect((stored as any).webhookId).toBe(42);
+    });
+
+    it("removes subscription from storage when unsubscribing", async () => {
+      mockExecSync("ok");
+      const storage = makeStorageMock();
+      const ctx = makeCtx({}, storage);
+
+      extensions["funnel"] = { getHostname: async () => "host.ts.net" };
+      extensions["webhooks"] = {
+        getConfig: () => ({ basePath: "/hooks", token: "secret" }),
+      };
+
+      await plugin.init!(ctx);
+
+      // Pre-populate storage with a subscription
+      await storage.put("github_subscriptions", "owner/repo", {
+        repo: "owner/repo",
+        webhookId: 99,
+        events: ["push"],
+        createdAt: new Date().toISOString(),
+      });
+
+      // Reload subscriptions from storage (simulating restart)
+      // Re-init picks up the stored subscription
+      await plugin.shutdown!();
+      await plugin.init!(ctx);
+
+      const ext = getGitHubExtension();
+
+      // auth check succeeds, then DELETE succeeds
+      mockExecSync("ok");
+      vi.mocked(spawnSync).mockReturnValueOnce({
+        stdout: "",
+        stderr: "",
+        status: 0,
+        signal: null,
+        pid: 1,
+        output: [null, "", ""],
+        error: undefined,
+      } as SpawnSyncReturns<string>);
+
+      const result = await ext.unsubscribe("owner/repo");
+      expect(result.success).toBe(true);
+
+      // Should be removed from storage
+      const stored = await storage.get("github_subscriptions", "owner/repo");
+      expect(stored).toBeNull();
+    });
+
+    it("loads subscriptions from storage on init", async () => {
+      mockExecSync("ok");
+      const storage = makeStorageMock();
+
+      // Pre-populate storage
+      await storage.put("github_subscriptions", "pre/loaded", {
+        repo: "pre/loaded",
+        webhookId: 77,
+        events: ["push", "pull_request"],
+        createdAt: "2024-01-01T00:00:00Z",
+      });
+
+      const ctx = makeCtx({}, storage);
+      await plugin.init!(ctx);
+
+      const ext = getGitHubExtension();
+      const subs = ext.listSubscriptions();
+
+      expect(subs).toHaveLength(1);
+      expect(subs[0].repo).toBe("pre/loaded");
+      expect(subs[0].webhookId).toBe(77);
+    });
+
+    it("logs loaded subscription count from storage", async () => {
+      mockExecSync("ok");
+      const storage = makeStorageMock();
+
+      await storage.put("github_subscriptions", "a/b", {
+        repo: "a/b",
+        webhookId: 1,
+        events: ["push"],
+        createdAt: "2024-01-01T00:00:00Z",
+      });
+      await storage.put("github_subscriptions", "c/d", {
+        repo: "c/d",
+        webhookId: 2,
+        events: ["push"],
+        createdAt: "2024-01-01T00:00:00Z",
+      });
+
+      const ctx = makeCtx({}, storage);
+      await plugin.init!(ctx);
+
+      expect(ctx.log.info).toHaveBeenCalledWith(
+        expect.stringContaining("2 repo subscription(s)"),
+      );
+    });
+
+    it("migrates subscriptions.json to storage on first run", async () => {
+      mockExecSync("ok");
+      const storage = makeStorageMock();
+
+      // Simulate subscriptions.json file exists
+      vi.mocked(existsSync).mockReturnValue(true);
+      vi.mocked(readFileSync).mockReturnValue(
+        JSON.stringify({
+          "legacy/repo": {
+            repo: "legacy/repo",
+            webhookId: 55,
+            events: ["push"],
+            createdAt: "2024-01-01T00:00:00Z",
+          },
+        }),
+      );
+
+      const ctx = makeCtx({}, storage);
+      await plugin.init!(ctx);
+
+      // Legacy data migrated to storage
+      const stored = await storage.get("github_subscriptions", "legacy/repo");
+      expect(stored).not.toBeNull();
+      expect((stored as any).webhookId).toBe(55);
+
+      // The JSON file should be deleted after migration
+      expect(unlinkSync).toHaveBeenCalled();
+    });
+
+    it("falls back to config subscriptions when storage is empty and no file", async () => {
+      mockExecSync("ok");
+      const storage = makeStorageMock();
+
+      // No file, empty storage — config has initial subscriptions
+      const ctx = makeCtx(
+        {
+          subscriptions: {
+            "config/repo": {
+              repo: "config/repo",
+              webhookId: 33,
+              events: ["pull_request"],
+              createdAt: "2024-01-01T00:00:00Z",
+            },
+          },
+        },
+        storage,
+      );
+
+      await plugin.init!(ctx);
+
+      const ext = getGitHubExtension();
+      const subs = ext.listSubscriptions();
+
+      expect(subs).toHaveLength(1);
+      expect(subs[0].repo).toBe("config/repo");
+      // Config data should also be persisted to storage
+      const stored = await storage.get("github_subscriptions", "config/repo");
+      expect(stored).not.toBeNull();
+    });
+
+    it("works without storage (graceful degradation) — no crash", async () => {
+      mockExecSync("ok");
+      // No storage provided — context does not have storage API
+      const ctx = makeCtx({});
+
+      // Should init without errors
+      await expect(plugin.init!(ctx)).resolves.not.toThrow();
+      expect(ctx.log.warn).toHaveBeenCalledWith(
+        expect.stringContaining("Storage API not available"),
       );
     });
   });
