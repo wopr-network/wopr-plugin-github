@@ -183,8 +183,8 @@ export interface WOPRPluginWithConfig extends WOPRPlugin {
  * that are not part of the core WOPREventMap.
  */
 export interface CustomEventEmitter {
-	on(event: string, listener: (...args: any[]) => void): void;
-	off(event: string, listener: (...args: any[]) => void): void;
+	on(event: string, listener: (...args: unknown[]) => void): void;
+	off(event: string, listener: (...args: unknown[]) => void): void;
 }
 
 export interface FunnelExtension {

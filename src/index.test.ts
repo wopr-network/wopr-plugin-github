@@ -1,3 +1,4 @@
+import type { WOPRPluginContext } from "@wopr-network/plugin-types";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 describe("wopr-plugin-github", () => {
@@ -21,7 +22,7 @@ describe("wopr-plugin-github", () => {
 				registerExtension,
 				unregisterExtension,
 				getExtension: vi.fn().mockReturnValue(null),
-			};
+			} as unknown as WOPRPluginContext;
 			await plugin.init?.(ctx);
 			const ext = registerExtension.mock.calls[0]?.[1];
 			expect(ext).toBeDefined();
@@ -69,7 +70,7 @@ describe("wopr-plugin-github", () => {
 				registerExtension,
 				unregisterExtension: vi.fn(),
 				getExtension: vi.fn().mockReturnValue(null),
-			};
+			} as unknown as WOPRPluginContext;
 
 			await plugin.init?.(ctx);
 
@@ -90,7 +91,7 @@ describe("wopr-plugin-github", () => {
 				registerExtension: vi.fn(),
 				unregisterExtension,
 				getExtension: vi.fn().mockReturnValue(null),
-			};
+			} as unknown as WOPRPluginContext;
 
 			await plugin.init?.(ctx);
 			await plugin.shutdown?.();
@@ -107,7 +108,7 @@ describe("wopr-plugin-github", () => {
 				registerExtension: vi.fn(),
 				unregisterExtension: vi.fn(),
 				getExtension: vi.fn().mockReturnValue(null),
-			};
+			} as unknown as WOPRPluginContext;
 
 			await plugin.init?.(ctx);
 			await expect(plugin.shutdown?.()).resolves.not.toThrow();

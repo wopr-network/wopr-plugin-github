@@ -35,8 +35,8 @@ import type {
 // Event listener references (for cleanup on shutdown)
 // ============================================================================
 
-let webhooksReadyHandler: ((...args: any[]) => void) | null = null;
-let hostnameChangedHandler: ((...args: any[]) => void) | null = null;
+let webhooksReadyHandler: ((...args: unknown[]) => void) | null = null;
+let hostnameChangedHandler: ((...args: unknown[]) => void) | null = null;
 
 // ============================================================================
 // State
@@ -76,8 +76,11 @@ function execGh(args: string[]): { stdout: string; success: boolean } {
 			stdout: (result.stderr || result.stdout || "").trim(),
 			success: false,
 		};
-	} catch (err: any) {
-		return { stdout: err.message || "", success: false };
+	} catch (err: unknown) {
+		return {
+			stdout: (err instanceof Error ? err.message : String(err)) || "",
+			success: false,
+		};
 	}
 }
 
@@ -477,9 +480,9 @@ async function persistSubscription(sub: RepoSubscription): Promise<void> {
 	try {
 		await storage.put(SUBSCRIPTIONS_TABLE, sub.repo, sub);
 		ctx?.log.debug?.(`Persisted subscription for ${sub.repo} to storage`);
-	} catch (err: any) {
+	} catch (err: unknown) {
 		ctx?.log.warn(
-			`Failed to persist subscription for ${sub.repo}: ${err.message}`,
+			`Failed to persist subscription for ${sub.repo}: ${err instanceof Error ? err.message : String(err)}`,
 		);
 	}
 }
@@ -493,8 +496,10 @@ async function removeSubscription(repo: string): Promise<void> {
 	try {
 		await storage.delete(SUBSCRIPTIONS_TABLE, repo);
 		ctx?.log.debug?.(`Removed subscription for ${repo} from storage`);
-	} catch (err: any) {
-		ctx?.log.warn(`Failed to remove subscription for ${repo}: ${err.message}`);
+	} catch (err: unknown) {
+		ctx?.log.warn(
+			`Failed to remove subscription for ${repo}: ${err instanceof Error ? err.message : String(err)}`,
+		);
 	}
 }
 
@@ -529,9 +534,9 @@ async function loadSubscriptions(): Promise<void> {
 			try {
 				unlinkSync(SUBSCRIPTIONS_PATH);
 				ctx?.log.info("Deleted legacy subscriptions.json after migration");
-			} catch (err: any) {
+			} catch (err: unknown) {
 				ctx?.log.warn(
-					`Failed to delete legacy subscriptions.json: ${err.message}`,
+					`Failed to delete legacy subscriptions.json: ${err instanceof Error ? err.message : String(err)}`,
 				);
 			}
 			return;
@@ -553,9 +558,9 @@ async function loadSubscriptions(): Promise<void> {
 			if (subscriptions.size > 0) {
 				return;
 			}
-		} catch (err: any) {
+		} catch (err: unknown) {
 			ctx?.log.warn(
-				`Failed to load subscriptions from storage: ${err.message}`,
+				`Failed to load subscriptions from storage: ${err instanceof Error ? err.message : String(err)}`,
 			);
 		}
 	}
@@ -885,7 +890,7 @@ function viewPr(repo: string, num: number): GitHubItemSummary | null {
 			title: data.title,
 			state: data.state,
 			author: data.author?.login || "unknown",
-			labels: (data.labels || []).map((l: any) => l.name),
+			labels: (data.labels || []).map((l: { name: string }) => l.name),
 			bodyPreview: truncate(data.body || "", 200),
 			url: data.url,
 			createdAt: data.createdAt,
@@ -929,7 +934,7 @@ function viewIssue(repo: string, num: number): GitHubItemSummary | null {
 			title: data.title,
 			state: data.state,
 			author: data.author?.login || "unknown",
-			labels: (data.labels || []).map((l: any) => l.name),
+			labels: (data.labels || []).map((l: { name: string }) => l.name),
 			bodyPreview: truncate(data.body || "", 200),
 			url: data.url,
 			createdAt: data.createdAt,
@@ -1562,11 +1567,23 @@ const plugin: WOPRPluginWithConfig = {
 			events.on("webhooks:ready", webhooksReadyHandler);
 
 			// Subscribe to funnel:hostname-changed — update all existing webhooks
-			hostnameChangedHandler = async (event: {
-				oldHostname: string;
-				newHostname: string;
-			}) => {
-				const { oldHostname, newHostname } = event;
+			hostnameChangedHandler = async (...args: unknown[]) => {
+				const raw = args[0];
+				if (
+					!raw ||
+					typeof raw !== "object" ||
+					typeof (raw as Record<string, unknown>).oldHostname !== "string" ||
+					typeof (raw as Record<string, unknown>).newHostname !== "string"
+				) {
+					pluginCtx.log.warn(
+						"funnel:hostname-changed received unexpected payload shape",
+					);
+					return;
+				}
+				const { oldHostname, newHostname } = raw as {
+					oldHostname: string;
+					newHostname: string;
+				};
 				pluginCtx.log.info(
 					`funnel:hostname-changed received: ${oldHostname} -> ${newHostname}`,
 				);
