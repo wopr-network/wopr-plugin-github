@@ -1568,11 +1568,22 @@ const plugin: WOPRPluginWithConfig = {
 
 			// Subscribe to funnel:hostname-changed — update all existing webhooks
 			hostnameChangedHandler = async (...args: unknown[]) => {
-				const event = args[0] as {
+				const raw = args[0];
+				if (
+					!raw ||
+					typeof raw !== "object" ||
+					typeof (raw as Record<string, unknown>).oldHostname !== "string" ||
+					typeof (raw as Record<string, unknown>).newHostname !== "string"
+				) {
+					pluginCtx.log.warn(
+						"funnel:hostname-changed received unexpected payload shape",
+					);
+					return;
+				}
+				const { oldHostname, newHostname } = raw as {
 					oldHostname: string;
 					newHostname: string;
 				};
-				const { oldHostname, newHostname } = event;
 				pluginCtx.log.info(
 					`funnel:hostname-changed received: ${oldHostname} -> ${newHostname}`,
 				);
