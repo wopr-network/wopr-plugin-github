@@ -1198,6 +1198,22 @@ const plugin: WOPRPluginWithConfig = {
 	version: "1.0.0",
 	description: "GitHub integration - webhooks, PRs, repo management",
 
+	manifest: {
+		name: "wopr-plugin-github",
+		version: "1.0.0",
+		description: "GitHub integration - webhooks, PRs, repo management",
+		capabilities: ["github-webhooks", "github-pr-view", "github-issue-view"],
+		category: "integration",
+		tags: ["github", "webhooks", "pr", "issues", "ci"],
+		icon: "github",
+		requires: {
+			bins: ["gh"],
+		},
+		lifecycle: {
+			shutdownBehavior: "graceful",
+		},
+	},
+
 	configSchema: {
 		title: "GitHub Integration",
 		description: "Configure GitHub webhooks and PR routing",
