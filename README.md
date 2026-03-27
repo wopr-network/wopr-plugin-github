@@ -1,3 +1,11 @@
+# ⚠️ This package has moved
+
+This package is now maintained in the [wopr-plugins monorepo](https://github.com/wopr-network/wopr-plugins/tree/main/packages/plugin-github).
+
+This repository is archived and no longer accepts contributions.
+
+---
+
 # wopr-plugin-github
 
 GitHub integration for WOPR - webhooks, PR notifications, and repository management.
@@ -110,7 +118,9 @@ For receiving GitHub webhooks without the built-in preset, you can configure a c
         "action": "agent",
         "wakeMode": "now",
         "sessionKey": "discord:misfits:#my-channel",
-        "messageTemplate": "GitHub {{action}}: PR #{{pull_request.number}} in {{repository.full_name}}: {{pull_request.title}}\nBy: {{pull_request.user.login}}\nURL: {{pull_request.html_url}}"
+        "messageTemplate": "GitHub {{action}}: PR #{{pull_request.number}} in {{repository.full_name}}: {{pull_request.title}}
+By: {{pull_request.user.login}}
+URL: {{pull_request.html_url}}"
       }
     ]
   }
